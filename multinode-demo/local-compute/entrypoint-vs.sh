@@ -10,6 +10,11 @@ ip link set tun9 mtu 1400
 ip addr add fd5a:5052::1/32 dev tun9
 ip link set tun9 up
 
+# Forward the HTTPS admin API from the ZPR-only interface to a host-loopback
+# published port. The TLS session remains end to end between the host client
+# and the Visa Service.
+socat TCP-LISTEN:8183,bind=0.0.0.0,reuseaddr,fork TCP:[fd5a:5052::1]:8182 &
+
 echo "starting valkey on 127.0.0.1:6379"
 valkey-server --bind 127.0.0.1 --port 6379 &
 

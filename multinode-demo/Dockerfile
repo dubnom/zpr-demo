@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y \
     libpcap-dev \
     curl \
     wget \
+    socat \
     build-essential \
  && rm -rf /var/lib/apt/lists/*
 

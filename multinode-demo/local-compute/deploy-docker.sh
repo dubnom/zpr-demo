@@ -64,7 +64,10 @@ ln -sfn "$INC_DIR" "$BOB_DIR/include"
 # --- Step 2 (§7.3): vs_keys.toml + client.key ---
 rm -f "$CONF_ROOT/vs/vs_keys.toml"
 "$BIN_DIR/vsapikey" create --init readwrite client "$CONF_ROOT/vs/vs_keys.toml" > "$BOB_DIR/client.key"
-echo "client key written to $BOB_DIR/client.key"
+"$BIN_DIR/vsapikey" create read web-monitor "$CONF_ROOT/vs/vs_keys.toml" > "$BOB_DIR/web-monitor.key"
+chmod 600 "$BOB_DIR/client.key" "$BOB_DIR/web-monitor.key"
+echo "operator key written to $BOB_DIR/client.key"
+echo "read-only monitor key written to $BOB_DIR/web-monitor.key"
 
 # --- Step 3: compile policy on host (needs ../include keys the .zplc references) ---
 render "$ADMIN/multinode-demo.zplc.template" "$ADMIN/multinode-demo.zplc"

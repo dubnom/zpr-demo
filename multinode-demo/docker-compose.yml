@@ -31,6 +31,8 @@ services:
       - ./local-compute/entrypoint-vs.sh:/entrypoint.sh:ro
       - ./local-compute/conf/vs:/conf
       - ./local-compute/logs:/logs
+    ports:
+      - "127.0.0.1:8183:8183/tcp"
     networks:
       zpr-local:
         ipv4_address: 172.30.0.11

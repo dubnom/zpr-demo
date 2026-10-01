@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+KEY_FILE="$MULTI_DIR/local-compute/bob/web-monitor.key"
+CA_FILE="$MULTI_DIR/zpr-conf/include/admin-tls-cert.pem"
+DASHBOARD_DIR="${ZPR_DASHBOARD_DIR:-$MULTI_DIR/../../zpr-visaservice/zpr-dashboard}"
+
+[[ -f "$KEY_FILE" ]] || {
+  echo "error: no read-only web monitor key at $KEY_FILE; run local-compute/deploy-docker.sh first" >&2
+  exit 1
+}
+[[ -f "$CA_FILE" ]] || {
+  echo "error: no Visa Service admin certificate at $CA_FILE" >&2
+  exit 1
+}
+[[ -f "$DASHBOARD_DIR/go.mod" ]] || {
+  echo "error: dashboard Go module not found at $DASHBOARD_DIR; set ZPR_DASHBOARD_DIR" >&2
+  exit 1
+}
+
+export ZPR_ADMIN_URL="https://127.0.0.1:8183"
+export ZPR_ADMIN_CA_FILE="$CA_FILE"
+export ZPR_ADMIN_KEY_FILE="$KEY_FILE"
+export ZPR_WEB_LISTEN="${ZPR_WEB_LISTEN:-127.0.0.1:8788}"
+
+echo "Starting read-only ZPR web monitor at http://$ZPR_WEB_LISTEN"
+cd "$DASHBOARD_DIR"
+exec go run ./cmd/zpr-web-dashboard

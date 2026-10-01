@@ -92,7 +92,7 @@ def generate_rsa_tls_key_and_cert(builddir, fname, cn):
     priv_key = f"{fname}-tls.key"
     cert_name = f"{fname}-tls.crt"
     run(f"openssl req -new -newkey rsa:4096 -x509 -sha256 -days 365 -nodes -out {key_dir}/{cert_name} -keyout {key_dir}/{priv_key}"
-        f" -subj '/CN={cn}'")
+        f" -subj '/CN={cn}' -addext 'subjectAltName=DNS:{cn}'")
 
 
 def main():

@@ -6,3 +6,10 @@ admin_cert = "/conf/vs-tls.crt"
 admin_key = "/conf/vs-tls.key"
 #vk_uti = "redis://[::1]:6379"
 
+[trusted_service_http.bas]
+url = "https://bas.zpr.org:3999"
+ca_cert = "/conf/bas-tls.crt"
+client_cert = "/conf/vs-tls.crt"
+client_key = "/conf/vs-tls.key"
+token_verification_key_file = "/conf/bas-token-hmac.key"
+

@@ -42,6 +42,8 @@ basdb:
 	$(BAS_RUN) add-attribute web.zpr.org color:purple
 	$(BAS_RUN) add-attribute web.zpr.org content:green
 	@mkdir -p $(BUILDDIR)/keys
+	openssl rand -out $(BUILDDIR)/keys/bas-token-hmac.key 48
+	chmod 600 $(BUILDDIR)/keys/bas-token-hmac.key
 	cp $(BASDB)/cn.admin.zpr.org/private.pem $(BUILDDIR)/keys/adapter-admin-bas.key
 	cp $(BASDB)/cn.cli.zpr.org/private.pem $(BUILDDIR)/keys/adapter-cli-bas.key
 	cp $(BASDB)/cn.web.zpr.org/private.pem $(BUILDDIR)/keys/adapter-web-bas.key

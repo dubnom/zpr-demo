@@ -21,7 +21,7 @@ mkdir -p /var/run/zpr
 
 echo "BAS launching the bas service"
 cd /app
-exec ./bin/bas serve --key /conf/bas-tls.key --cert /conf/bas-tls.crt &
+exec ./bin/bas serve --key /conf/bas-tls.key --cert /conf/bas-tls.crt --token-key-file /conf/bas-token-hmac.key &
 cd ..
 
 sleep 1

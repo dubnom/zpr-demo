@@ -26,6 +26,7 @@ forms are kept below on purpose: they're the reference when a command misbehaves
 | `demo-vs-admin <CMD…>` | `vs-admin` with `--svc-url`, `--ca-cert` and the API key filled in |
 | `demo-vs-admin-gui` | alias for `demo-vs-admin gui` |
 | `demo-zpr-dashboard` | the `zpr-dashboard` TUI — richer than `demo-vs-admin gui` |
+| `demo-zpr-web-dashboard` | local read-only browser monitor for Visa Service state |
 | `demo-attr <set\|add\|rm\|del\|show\|push\|save\|selftest>` | edit the attribute file + flush the vs cache |
 | `fetch <URL> [curl-args…]` | `curl` under a green SUCCESS / red FAILED banner. Also on `alice` as `~/fetch` |
 
@@ -320,6 +321,15 @@ API. It also runs inside `vs`, with cwd `/conf` — it has no flags and reads
 `./config.toml`, which `deploy-docker.sh` installs there from
 `zpr-conf/confs/zpr-dashboard-config.toml`. The API key goes in as `ZPR_API_KEY`,
 which overrides the file.
+
+**Web monitor:** after `local-compute/deploy-docker.sh`, run
+`commands/demo-zpr-web-dashboard` and open `http://127.0.0.1:8788`. The deploy
+script creates a separate read-only API key for the monitor. The `vs` container
+relays its admin TLS port to host loopback at `127.0.0.1:8183`; the relay is not
+published to the LAN, and the browser never receives the API key.
+
+If the Docker image predates the admin relay, rebuild it with
+`docker build -t zpr-multinode .` before re-running `local-compute/deploy-docker.sh`.
 
 **Editing the attribute file (`attrfile.json`) live:** `zpr-conf/admin/attrfile.json`
 holds the JSON attributes referenced by the policy and read by the visa service.
