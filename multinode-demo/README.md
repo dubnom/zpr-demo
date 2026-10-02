@@ -34,9 +34,9 @@ forms are kept below on purpose: they're the reference when a command misbehaves
 
 | NAME | what | where |
 |---|---|---|
-| `node0` | substrate node | OCI `node` |
-| `ociweb` | web adapter | OCI `webserver` |
-| `alice` | alice's adapter (runs as root) | OCI `alice` |
+| `node0` | first substrate node | local Docker `node0` |
+| `web0` | OciWeb service adapter | local Docker `web0` |
+| `alice` | alice's adapter/client | local Docker `alice` |
 | `node1` | substrate node | docker `node1` |
 | `vs` | the visa service's **adapter** | docker `vs` |
 | `premweb` | web adapter | docker `web1` |
@@ -56,6 +56,20 @@ is how a policy allow or deny is shown. HTTP 4xx/5xx count as failures; set
 (`prem_user -> #user.prem_user`), so the mere *presence* of the key sets it —
 `demo-attr set alice prem_user no` **grants** `prem_user`. `demo-attr del` is the
 only way to revoke.
+
+**Build Linux/amd64 demo binaries** from this directory before building the image:
+
+```bash
+make ZPR_ROOT=../.. linux-amd64
+docker build --platform linux/amd64 -t zpr-multinode .
+```
+
+`ZPR_ROOT` must contain the `zpr-core`, `zpr-visaservice`, `zpr-compiler`,
+`zpr-utils`, and `zpr-dev-tools` repositories. Rust builds run inside the
+Debian dev-env image; the Go dashboard is cross-built with CGO disabled. This
+produces ELF binaries usable by the Ubuntu containers and OCI hosts, including
+when building from Apple Silicon. The build includes `ph-cli`, which the remote
+deploy uses to verify the peer link.
 
 ## How to install (OCI hosts)
 
@@ -171,30 +185,34 @@ an `include/` dir with only the certs/keys that config references. Runtime dir
 `/var/run/zpr` is created ubuntu-writable (one `sudo` per host, done by the
 script). Note `/var/run` is tmpfs — re-run the script after a host reboot.
 
-**Expected state:** the node's `ph` listens on `0.0.0.0:5000`; the web adapter
-connects to it and verifies its name over noise. The adapter's link then cycles
-in `Helloing`, because it needs the **visa service** — which lives in the local
-docker env behind `node1`, and node0 ↔ node1 linking is not implemented yet. So
-`Helloing` is the expected steady state for the OCI side today.
+**Expected state:** after the local and OCI deployments finish, `node0` and
+`node1` each show the other peer at `:5000 (Active)` in `ph-cli link show`.
+Only then does `deploy-zpr.sh` start the `web0` and `alice` adapters. Their
+links can reach the Visa Service behind `node1` and should proceed past
+`Helloing` when policy grants the requested service.
 
 ### Full startup sequence (both envs)
 
-**Not achievable yet** — `node0 ↔ node1` linking is unimplemented, so the visa
-service (local, behind `node1`) is unreachable from OCI and every OCI adapter
-cycles in `Helloing`. Starting the docker env first does not change that. The
-intended sequence, once the node link works:
+Node-to-node links are configured from the authenticated Visa Service topology
+and use the reciprocal peer Noise-certificate pins in `node0-conf.toml` and
+`node1-conf.toml`. Node1 is behind Docker NAT, so its published substrate
+endpoint must be reachable from OCI. Open inbound TCP and UDP port 5000 on the
+Docker host and any host firewall.
 
-1. **Local docker env** — `./local-compute/deploy-docker.sh` already does this
-   order: `node1` → `vs` → vs adapter → `web1` adapter.
-2. **OCI env** — `node0` first.
-3. **Wait for `node1` to connect to `node0`.** ⚠️ Unimplemented: we don't yet
-   know what that connection looks like from node0's side, so there's nothing
-   to poll for. `deploy-zpr.sh` currently barrels straight past this point.
-4. **Then** the `web0` adapter, **then** the `alice` adapter — the order
-   `deploy-zpr.sh` already uses.
+Set the same externally reachable IPv4 address for both deploy scripts. Do not
+use `127.0.0.1`; node0 would connect to itself.
 
-So only step 3 is missing. When the node link lands, add the wait there (see the
-marker in `oci-compute/deploy-zpr.sh`) and the rest of the sequence is in place.
+```bash
+export NODE1_EXT_ADDR=<public-ip-of-docker-host>
+./local-compute/deploy-docker.sh
+./oci-compute/deploy-zpr.sh
+```
+
+The local script starts `node1`, Visa Service, and the local web adapter. The
+OCI script starts `node0`, waits up to 180 seconds for node1's peer link to be
+`Active`, then starts `web0` and `alice`. If the wait fails, inspect
+`~/zpr/node.log` on node0 and `local-compute/logs/node1.log`; check the peer
+certificate pins, `NODE1_EXT_ADDR`, and inbound 5000/TCP+UDP reachability.
 
 ### The `alice` host
 
@@ -205,8 +223,8 @@ visa service, so `ph` creates its own TUN device and therefore runs under
 `sudo`. Everything else matches the other hosts: `~/zpr/{ph,adapter-alice-conf.toml,include/}`,
 tmux session `adapter`, log tee'd to `~/zpr/adapter.log`.
 
-**SSH in and curl through ZPR** — needs the adapter running *and* a reachable
-visa service, so this does not work yet (see **Current limitation** below):
+**SSH in and curl through ZPR** — after the node peer is `Active` and the
+adapter has completed authentication:
 
 ```bash
 ssh -i ~/.ssh/zpr-demo ubuntu@$(tofu -chdir=oci-compute output -json public_ips | jq -r .alice)
@@ -239,37 +257,33 @@ Restart it with `./deploy-zpr.sh`, or stop it with `sudo pkill -x ph` (plain
 `tmux kill-session` is not enough — `ph` is root here, so tmux running as
 `ubuntu` cannot signal it).
 
-The `curl`s above will work once node-to-node linking lands — see
-[Full startup sequence](#full-startup-sequence-both-envs) above.
+If a request stalls, check the adapter's link state and Visa Service policy
+decision before assuming the substrate route is missing.
 
 
 
 ## How to deploy & run ZPR (local docker env)
 
-The local "on-prem" side runs three containers — `node1`, `vs` (visa service),
-`web1` — from one image (`zpr-multinode`). `docker-compose.yml` owns the infra
-(static IPs on bridge `zpr-local` `172.30.0.0/24`, `node1` publishing `5000`
-tcp+udp, tun9 caps); `local-compute/deploy-docker.sh` does the dynamic parts
-(render configs, generate `vs_keys.toml`, compile the policy, launch the ZPR
-processes in order). See [`work/docker-configure-run-zpr.md`](work/docker-configure-run-zpr.md).
+The local multi-node network runs six containers — `node0`, `node1`, `vs`,
+`web0`, `web1`, and `alice` — on the Compose bridge. `node0` hosts the bootstrap
+Visa Service adapter and OciWeb; `node1` hosts Alice. The separate PremWeb
+adapter can be enabled with `START_PREMWEB_ADAPTER=1`.
+Both nodes use static, reciprocal peer entries pinned to the other node's Noise
+certificate. This path needs no OCI resources or public host address.
 
-**Prerequisites:** `../oci-compute` applied (the policy needs node0's public IP),
-and the image built once:
-
-```bash
-docker build -t zpr-multinode .
-```
-
-**Deploy:**
+**Build and deploy from Apple Silicon or Linux:**
 
 ```bash
-./local-compute/deploy-docker.sh                    # same-host operator
-NODE1_EXT_ADDR=<host-ip> ./local-compute/deploy-docker.sh   # cross-host operator
+make ZPR_ROOT=../.. linux-amd64
+docker build --platform linux/amd64 -t zpr-multinode .
+./local-compute/deploy-docker.sh
 ```
 
-Re-runnable: it re-renders configs, recompiles the policy, and restarts each
-process (old tmux session killed first). No image rebuild needed for a re-deploy
-(configs come in as volume mounts).
+The builder creates Linux/amd64 ELF binaries for the Ubuntu containers. Docker
+Desktop on Apple Silicon runs the pinned amd64 image under emulation. The
+deploy script waits for both `node0` and `node1` to report the peer substrate
+endpoint as `(Active)` before starting the endpoint adapters. It is safe to rerun;
+configs and policy are regenerated and the managed demo processes restart.
 
 **Watch the ZPR processes** (logs tee'd to a host-mounted volume — no `docker
 exec` needed):
@@ -278,17 +292,21 @@ exec` needed):
 tail -f local-compute/logs/*.log
 ```
 
-Sessions: `node1` (node), `vs` + `vs-adapter` (vs container), `web1-adapter`
-(web1). Attach live (Ctrl-b d to detach):
+Sessions: `node0` and `node1` (nodes), `vs` and `vs-adapter` (vs container),
+`web0-adapter`, and `alice-adapter`; `web1-adapter` is optional. Attach live
+(Ctrl-b d to detach):
 
 ```bash
 docker exec -it vs tmux attach -t vs
 ```
 
-**Expected state:** node1's `ph` listens on `0.0.0.0:5000`; the vs and web1
-adapters connect, authenticate, and their `dock link` becomes `ACTIVE` (past
-`Helloing`). `cert failed signature verification` / `unverified name` warnings
-are benign (default trusted service, cert checking disabled in this demo policy).
+**Expected state:** `docker exec node0 /app/bin/ph-cli -p
+/var/run/zpr/control.sock link show` and the equivalent command for `node1`
+both show the other node at `:5000 (Active)`. The `vs` adapter and web0 attach
+to node0; Alice attaches to node1. The deploy smoke test requests OciWeb from
+Alice across node1 → node0 and fails unless policy-authorized HTTP returns
+successfully. Check `local-compute/logs/node0.log` and `node1.log` if the peer
+gate times out.
 
 **Operator client (`bob`):** `deploy-docker.sh` renders the host-side client adapter and
 generates its key at `local-compute/bob/` (`adapter-bob-conf.toml` +

@@ -3,9 +3,22 @@ name = "node0.demo"
 ca_file = "include/auth-ca.crt"
 certificate_file = "include/node0-noise.crt"
 private_key_file = "include/node0-noise.key"
-self_addr = "0.0.0.0:5000"
+self_addr = "172.30.0.13:5000"
 zpr_addr = [ "fd5a:5052:90de::10" ]
 tun_if = "tun9"
+control_path = "/var/run/zpr/control.sock"
 
 [authentication]
 auth_private_key = "include/node0-private-key.pem"
+
+[node]
+advertised_substrate_addr = "172.30.0.13:5000"
+local_vs_dock = true
+
+[node.peer_noise_certificates]
+"fd5a:5052:90de::11" = "include/node1-noise.crt"
+
+[[node.peers]]
+zpr_addr = "fd5a:5052:90de::11"
+substrate_addr = "172.30.0.10:5000"
+link_id = "n0n1"

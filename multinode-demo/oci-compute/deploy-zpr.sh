@@ -26,6 +26,11 @@ NODE_PRIV=$(tf output -json private_ips | jq -r .node)
 NODE_PUB=$(tf output -json public_ips   | jq -r .node)
 WEB_PUB=$(tf output -json public_ips     | jq -r .webserver)
 ALICE_PUB=$(tf output -json public_ips   | jq -r .alice)
+NODE1_EXT_ADDR="${NODE1_EXT_ADDR:-}"
+if [[ -z "$NODE1_EXT_ADDR" || ! "$NODE1_EXT_ADDR" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ || "$NODE1_EXT_ADDR" == 127.* ]]; then
+  echo "ERROR: set NODE1_EXT_ADDR to node1's externally reachable IPv4 address" >&2
+  exit 1
+fi
 echo "node priv=$NODE_PRIV pub=$NODE_PUB ; webserver pub=$WEB_PUB ; alice pub=$ALICE_PUB"
 
 # tun9 sanity. Run straight after `tofu apply` and cloud-init may still be
@@ -74,7 +79,25 @@ deploy_host() {  # $1=pubip $2=conf-path $3=label
   fi
   scp "${SSH_OPTS[@]}" "$conf" "ubuntu@$ip:zpr/"
   scp "${SSH_OPTS[@]}" "${inc[@]/#/$INC_DIR/}" "ubuntu@$ip:zpr/include/"
+  scp "${SSH_OPTS[@]}" "$BIN_DIR/ph-cli" "ubuntu@$ip:zpr/"
+  ssh_h "$ip" "chmod 755 ~/zpr/ph-cli"
   ssh_h "$ip" "sudo install -d -o ubuntu -g ubuntu /var/run/zpr"   # one sudo step
+}
+
+wait_for_node1_peer() {
+  local summary
+  echo "[node] waiting for node1 at $NODE1_EXT_ADDR:5000 to become Active"
+  for _ in $(seq 90); do
+    summary=$(ssh_h "$NODE_PUB" "~/zpr/ph-cli -p /var/run/zpr/control.sock link show" 2>/dev/null || true)
+    if grep -Fq "$NODE1_EXT_ADDR:5000 (Active)" <<< "$summary"; then
+      echo "[node] node1 peer link is Active"
+      return 0
+    fi
+    sleep 2
+  done
+  echo "ERROR: node1 peer link did not become Active within 180 seconds" >&2
+  ssh_h "$NODE_PUB" "tail -n 80 ~/zpr/node.log" >&2 || true
+  exit 1
 }
 
 # --- Step 3: start ph inside a detached tmux session so it can be attached to ---
@@ -105,13 +128,7 @@ ALICE_CONF=$(render adapter-alice-conf.toml.template)
 # §4 step 2: node first.
 deploy_host "$NODE_PUB" "$CONF_DIR/node0-conf.toml" node
 start_ph    "$NODE_PUB" node node0-conf.toml node
-
-# TODO: wait here until node1 (local docker) has connected to node0 — the
-# adapters below need the visa service, which sits behind node1. Not
-# implementable yet: node-to-node linking doesn't work, so we don't know what
-# that connection looks like from node0's side and have nothing to poll for.
-# ponytail: no wait, so the adapters below start early and cycle in Helloing;
-# poll node.log (or `ph`'s peer state) for the node1 link once that exists.
+wait_for_node1_peer
 
 # §4 step 4: web service already up from cloud-init — just verify.
 ssh_h "$WEB_PUB" "curl -fsS http://localhost:80 >/dev/null" \

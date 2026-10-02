@@ -7,9 +7,8 @@ tun_if = "tun9"
 
 [adapter]
 name = "vs.zpr"
-# This is private addr of node1 running locally (port 5000).
-# TBD: how to get this?
-node_addr = "@@NODE1_ADDR@@:5000"
-node_public_key_file = "include/node1-noise-pub.pem"
+# Node0 owns the bootstrap VS adapter; node1 reaches VS across the node peer.
+node_addr = "@@NODE0_ADDR@@:5000"
+node_public_key_file = "include/node0-noise-pub.pem"
 bootstrap_key = "include/vs-private-key.pem"
 

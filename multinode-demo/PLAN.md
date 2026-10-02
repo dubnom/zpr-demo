@@ -196,7 +196,7 @@ node1 address, and one token means different things in different files. The
 | sentinel / field | meaning | value source |
 |---|---|---|
 | `@@NODE1_ADDR@@` (`adapter-vs`, `adapter-web1`) | node1's **docker-internal** IP — in-network clients reach node1 directly | the compose static IP for `node1` |
-| `@@NODE1_EXT_ADDR@@` (`adapter-bob`, policy `.zplc` n1 substrate) | node1 as reached **from outside docker** = host IP + published 5000 | `deploy-docker.sh` param; default `127.0.0.1` for a same-host operator, override for cross-host |
+| `@@NODE1_EXT_ADDR@@` (`adapter-bob`, policy `.zplc` n1 substrate) | node1 as reached **from OCI** = externally reachable host IP + published 5000 | required `NODE1_EXT_ADDR`; inbound TCP+UDP 5000 must reach Docker node1 |
 | `@@NODE0_PUBLIC_ADDR@@` (policy `.zplc` n0 substrate) | **OCI node0's PUBLIC IP** so on-prem can reach it across the internet | `tofu -chdir=../oci-compute output -json public_ips \| jq -r .node` |
 
 Note the policy's `@@NODE0_PUBLIC_ADDR@@` is deliberately a distinct token from

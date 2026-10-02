@@ -4,8 +4,9 @@
 services:
   node1:
     image: zpr-multinode
+    platform: linux/amd64
     container_name: node1
-    command: ["/entrypoint.sh"]
+    command: ["/bin/sh", "/entrypoint.sh"]
     cap_add: [NET_ADMIN]
     devices: ["/dev/net/tun"]
     privileged: true
@@ -16,14 +17,43 @@ services:
     networks:
       zpr-local:
         ipv4_address: 172.30.0.10
-    ports:
-      - "5000:5000/tcp"
-      - "5000:5000/udp"
+
+  alice:
+    image: zpr-multinode
+    platform: linux/amd64
+    container_name: alice
+    command: ["/bin/sh", "/entrypoint.sh"]
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun"]
+    privileged: true
+    volumes:
+      - ./local-compute/entrypoint-alice.sh:/entrypoint.sh:ro
+      - ./local-compute/conf/alice:/conf
+      - ./local-compute/logs:/logs
+    networks:
+      zpr-local:
+        ipv4_address: 172.30.0.15
+  node0:
+    image: zpr-multinode
+    platform: linux/amd64
+    container_name: node0
+    command: ["/bin/sh", "/entrypoint.sh"]
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun"]
+    privileged: true
+    volumes:
+      - ./local-compute/entrypoint-node0.sh:/entrypoint.sh:ro
+      - ./local-compute/conf/node0:/conf
+      - ./local-compute/logs:/logs
+    networks:
+      zpr-local:
+        ipv4_address: 172.30.0.13
 
   vs:
     image: zpr-multinode
+    platform: linux/amd64
     container_name: vs
-    command: ["/entrypoint.sh"]
+    command: ["/bin/sh", "/entrypoint.sh"]
     cap_add: [NET_ADMIN]
     devices: ["/dev/net/tun"]
     privileged: true
@@ -32,15 +62,16 @@ services:
       - ./local-compute/conf/vs:/conf
       - ./local-compute/logs:/logs
     ports:
-      - "127.0.0.1:8183:8183/tcp"
+      - "127.0.0.1:8185:8183/tcp"
     networks:
       zpr-local:
         ipv4_address: 172.30.0.11
 
   web1:
     image: zpr-multinode
+    platform: linux/amd64
     container_name: web1
-    command: ["/entrypoint.sh"]
+    command: ["/bin/sh", "/entrypoint.sh"]
     cap_add: [NET_ADMIN]
     devices: ["/dev/net/tun"]
     privileged: true
@@ -56,6 +87,23 @@ services:
     networks:
       zpr-local:
         ipv4_address: 172.30.0.12
+
+  web0:
+    image: zpr-multinode
+    platform: linux/amd64
+    container_name: web0
+    command: ["/bin/sh", "/entrypoint.sh"]
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun"]
+    privileged: true
+    volumes:
+      - ./local-compute/entrypoint-web0.sh:/entrypoint.sh:ro
+      - ./local-compute/conf/web0:/conf
+      - ./local-compute/logs:/logs
+      - ./tools:/tools:ro
+    networks:
+      zpr-local:
+        ipv4_address: 172.30.0.14
 
 networks:
   zpr-local:

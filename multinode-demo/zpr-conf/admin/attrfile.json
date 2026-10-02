@@ -1,11 +1,13 @@
 {
-  "bob": {
-    "location": ["onprem"],
-    "access": ["onprem"]
-  },
-  "alice": {
-    "location": ["cloud"],
-    "access": ["cloud"]
+  "device.zpr.adapter.cn": {
+    "bob": {
+      "location": ["onprem"],
+      "access": ["onprem"]
+    },
+    "alice": {
+      "location": ["cloud"],
+      "access": ["cloud"]
+    }
   }
 }
 

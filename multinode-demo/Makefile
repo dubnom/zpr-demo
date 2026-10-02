@@ -1,8 +1,20 @@
 ZPR_ROOT ?=
 
-.PHONY: all ph visaservice compiler dashboard check-zpr-root clean
+.PHONY: all linux-amd64 ph visaservice compiler dashboard check-zpr-root clean
 
 all: ph visaservice compiler dashboard
+
+linux-amd64: check-zpr-root
+	docker build --platform linux/amd64 -t zpr-multinode-builder \
+		-f Dockerfile.build-linux .
+	docker run --rm --platform linux/amd64 -e ZPR_ROOT=/work \
+		-v "$(ZPR_ROOT):/work" zpr-multinode-builder \
+		/bin/bash /work/zpr-demo/multinode-demo/build-linux-amd64.sh
+	mkdir -p bin
+	cd "$(ZPR_ROOT)/zpr-visaservice/zpr-dashboard" && \
+		GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath \
+		-ldflags '-s -w' -o bin/zpr-dashboard ./cmd/zpr-dashboard
+	cp "$(ZPR_ROOT)/zpr-visaservice/zpr-dashboard/bin/zpr-dashboard" bin/
 
 check-zpr-root:
 	@test -n "$(ZPR_ROOT)" || { \
@@ -17,7 +29,9 @@ check-zpr-root:
 ph: check-zpr-root
 	mkdir -p bin
 	cd "$(ZPR_ROOT)/zpr-core/adapter/ph" && cargo build --release
-	cp "$(ZPR_ROOT)/zpr-core/target/release/ph" bin/
+	cd "$(ZPR_ROOT)/zpr-core" && cargo build --release -p ph-cli
+	cp "$(ZPR_ROOT)/zpr-core/target/release/ph" \
+		"$(ZPR_ROOT)/zpr-core/target/release/ph-cli" bin/
 
 visaservice: check-zpr-root
 	mkdir -p bin

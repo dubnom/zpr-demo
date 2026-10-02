@@ -5,16 +5,14 @@ provider = [["device.zpr.adapter.cn", "node0.demo"]]
 zpr_address = "fd5a:5052:90de::10"
 
 [nodes.n0.substrate_addrs]
-i0 = "@@NODE0_PUBLIC_ADDR@@:5000"
+i0 = "@@NODE0_ADDR@@:5000"
 
 [nodes.n1]
 provider = [["device.zpr.adapter.cn", "node1.demo"]]
 zpr_address = "fd5a:5052:90de::11"
 
 [nodes.n1.substrate_addrs]
-# TODO: Is this going to work? In demo scenario I presum on-prem cannot be reached (its behind firewall and nat).
-# I think node 1 will SYN to NODE 0 not the other way around.
-i0 = "@@NODE1_EXT_ADDR@@:5000"
+i0 = "@@NODE1_ADDR@@:5000"
 
 [links.n0n1]
 peers = [{node="n0"}, {node="n1"}]

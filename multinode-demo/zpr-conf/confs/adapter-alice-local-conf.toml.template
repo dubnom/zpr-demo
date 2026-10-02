@@ -1,0 +1,8 @@
+[global]
+ca_file = "include/auth-ca.crt"
+
+[adapter]
+name = "alice"
+node_addr = "@@NODE1_ADDR@@:5000"
+node_public_key_file = "include/node1-noise-pub.pem"
+bootstrap_key = "include/alice-private-key.pem"
