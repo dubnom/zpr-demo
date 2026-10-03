@@ -1,2 +1,4 @@
-Define WebService as a service with endpoint.zpr.adapter.cn:'web.zpr.org'.
-Allow user to access WebService.
+define WebService as a service with device.zpr.adapter.cn:'web.zpr.org'.
+
+service WebService as json {"service_class":"WebService"}.
+  allow user.

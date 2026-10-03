@@ -8,7 +8,7 @@ order = ["hosts", "dns"]
 "node0.overlay" = "129.6.7.100" # docker
 
 [nodes.node]
-provider = [ ["endpoint.zpr.adapter.cn", "node.zpr.org"]]
+provider = [ ["device.zpr.adapter.cn", "node.zpr.org"]]
 zpr_address = "node0.zpr"
 interfaces = ["in1"]
 in1.netaddr = "node0.overlay:5000"
@@ -22,7 +22,7 @@ client = "AuthService"
 cert_path = "bas-tls.crt"
 returns_attributes = [ "color -> user.color", "bas_id -> user.bas_id", "content -> service.content" ]
 identity_attributes = ["bas_id"]
-provider = [ [ "endpoint.zpr.adapter.cn", "bas.zpr.org" ] ]
+provider = [ [ "device.zpr.adapter.cn", "bas.zpr.org" ] ]
 
 [visa_service]
 dock_node = "node"

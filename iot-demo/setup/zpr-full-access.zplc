@@ -1,12 +1,12 @@
 [nodes."node"]
-provider = [ ["endpoint.zpr.adapter.cn", "node.zpr.org"]]
+provider = [ ["device.zpr.adapter.cn", "node.zpr.org"]]
 zpr_address = "fd5a:5052:90de::1"
 
 [trusted_services.default]
 
 [visa_service]
 dock_node = "node"
-admin_attrs = [ [ "endpoint.zpr.adapter.cn", "admin.zpr.org" ] ]
+admin_attrs = [ [ "device.zpr.adapter.cn", "admin.zpr.org" ] ]
 
 [bootstrap]
 "node.zpr.org" = "node-public-key.pem"

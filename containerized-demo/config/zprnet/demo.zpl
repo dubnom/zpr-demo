@@ -1,14 +1,18 @@
 Define AuthService as a service.
 
-Define AuthSvcPing as a service with endpoint.zpr.adapter.cn:'bas.zpr.org'.
+Define AuthSvcPing as a service with device.zpr.adapter.cn:'bas.zpr.org'.
 Define NetAdmins   as users with color:blue.
 
 Define WebService  as a service with user.bas_id:1234.
 
-Allow zpr.adapter.cn: endpoints to access AuthService.
+service AuthService as json {"service_class":"AuthService"}.
+  allow zpr.adapter.cn: devices.
 
-Allow color: users to access AuthSvcPing.
+service AuthSvcPing as json {"service_class":"AuthSvcPing"}.
+  allow color: users.
 
-Allow color:green users to access WebServices.
+service WebService as json {"service_class":"WebService"}.
+  allow color:green users.
 
-Allow NetAdmins to access VisaService.
+provide VisaService at visa-admin.svc.zpr over TCP 443.
+  allow NetAdmins.

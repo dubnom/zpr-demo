@@ -4,8 +4,10 @@ Define OciWeb as a service.
 # http://premweb.demo
 Define PremWeb as a service.
 
-Allow access:cloud users to access OciWeb.
+service OciWeb as json {"service_class":"OciWeb"}.
+  allow access:cloud users.
+  allow access:all users.
 
-Allow access:onprem users to access PremWeb.
-
-Allow access:all users to access services.
+service PremWeb as json {"service_class":"PremWeb"}.
+  allow access:onprem users.
+  allow access:all users.

@@ -183,7 +183,7 @@ vs::visa_mgr: created visa 1004
 ```
 
 That is the visa service authorizing device_a's flow under the policy's single `allow`
-rule — `allow VerifiedIoTDevices to access OracleIoT`, which device-a matches because
+rule, `allow VerifiedIoTDevices.`, below `provide OracleIoT at oracle-iot.svc.zpr over TCP 1883.`, which device-a matches because
 `attrfile.json` gives it `OCIApproved:true`. Contrast with device_b, which never gets one.
 
 ### 6. Verify device_b is genuinely blocked *by the visa service*
