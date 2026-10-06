@@ -308,6 +308,37 @@ Alice across node1 → node0 and fails unless policy-authorized HTTP returns
 successfully. Check `local-compute/logs/node0.log` and `node1.log` if the peer
 gate times out.
 
+### Dashboard-managed organization directory
+
+Profiles using the `docker-multinode` runtime are activated through the
+dashboard's `scripts/activate-organization.sh`, which stops the previous
+managed runtime before starting the selected organization's Compose project.
+The organization profile's LDIF seeds a private LDAPS sidecar and the existing
+mTLS trusted-service provider. Directory data, passwords, and TLS keys live
+under `.local-runtime/multinode/<organization-id>/directory`; the shared
+Linux/amd64 provider binary lives under `.local-runtime/dashboard-stack/`.
+The directory service is attached only to that organization's private Compose
+network and publishes no host port. The generic `multinode-demo` deployment
+does not enable the directory sidecar.
+
+Use the deployer's `validate` action to seed the selected organization's private
+directory and test LDAPS plus mTLS device-owner and user-role lookups without
+starting or stopping a ZPR Compose runtime. For multi-node profiles it also
+renders and compiles the policy artifacts:
+
+```bash
+ZPR_ORGANIZATION_ID=redwood \
+ZPR_RUNTIME_ROOT=../../.local-runtime/multinode/redwood \
+  ./local-compute/deploy-docker.sh validate
+```
+
+This exposes organization identities and attributes to Visa Service through
+trusted-service mappings and to the dashboard's LDAP-backed views. The
+multi-node demo's compiled policy still governs generic OciWeb/PremWeb
+endpoints; it does not yet enforce Redwood's sample role rules. Redwood's
+RouteExchange, FleetTelemetry, and ShipmentLedger entries remain illustrative
+and are not deployed services.
+
 **Operator client (`bob`):** `deploy-docker.sh` renders the host-side client adapter and
 generates its key at `local-compute/bob/` (`adapter-bob-conf.toml` +
 `client.key`) — run `sudo bin/ph adapter -c adapter-bob-conf.toml` from there

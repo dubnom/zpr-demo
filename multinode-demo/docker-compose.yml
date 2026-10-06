@@ -1,19 +1,20 @@
 # Local "on-prem" ZPR env: node1 + vs + web1, one image, static IPs.
-# Bring up via local-compute/deploy-docker.sh (it renders configs into
-# local-compute/conf/<name>/ first, then `docker compose up -d`).
+# Bring up via local-compute/deploy-docker.sh (it renders configs into the
+# selected organization runtime directory before `docker compose up -d`).
 services:
   node1:
+    profiles: ["legacy"]
     image: zpr-multinode
     platform: linux/amd64
-    container_name: node1
+    container_name: ${ZPR_CONTAINER_PREFIX:-}node1
     command: ["/bin/sh", "/entrypoint.sh"]
     cap_add: [NET_ADMIN]
     devices: ["/dev/net/tun"]
     privileged: true
     volumes:
       - ./local-compute/entrypoint-node1.sh:/entrypoint.sh:ro
-      - ./local-compute/conf/node1:/conf
-      - ./local-compute/logs:/logs
+      - ${ZPR_RUNTIME_ROOT:-./local-compute}/conf/node1:/conf
+      - ${ZPR_RUNTIME_ROOT:-./local-compute}/logs:/logs
     networks:
       zpr-local:
         ipv4_address: 172.30.0.10
@@ -21,30 +22,31 @@ services:
   alice:
     image: zpr-multinode
     platform: linux/amd64
-    container_name: alice
+    container_name: ${ZPR_CONTAINER_PREFIX:-}alice
     command: ["/bin/sh", "/entrypoint.sh"]
     cap_add: [NET_ADMIN]
     devices: ["/dev/net/tun"]
     privileged: true
     volumes:
       - ./local-compute/entrypoint-alice.sh:/entrypoint.sh:ro
-      - ./local-compute/conf/alice:/conf
-      - ./local-compute/logs:/logs
+      - ${ZPR_RUNTIME_ROOT:-./local-compute}/conf/alice:/conf
+      - ${ZPR_RUNTIME_ROOT:-./local-compute}/logs:/logs
     networks:
       zpr-local:
         ipv4_address: 172.30.0.15
   node0:
+    profiles: ["legacy"]
     image: zpr-multinode
     platform: linux/amd64
-    container_name: node0
+    container_name: ${ZPR_CONTAINER_PREFIX:-}node0
     command: ["/bin/sh", "/entrypoint.sh"]
     cap_add: [NET_ADMIN]
     devices: ["/dev/net/tun"]
     privileged: true
     volumes:
       - ./local-compute/entrypoint-node0.sh:/entrypoint.sh:ro
-      - ./local-compute/conf/node0:/conf
-      - ./local-compute/logs:/logs
+      - ${ZPR_RUNTIME_ROOT:-./local-compute}/conf/node0:/conf
+      - ${ZPR_RUNTIME_ROOT:-./local-compute}/logs:/logs
     networks:
       zpr-local:
         ipv4_address: 172.30.0.13
@@ -52,33 +54,49 @@ services:
   vs:
     image: zpr-multinode
     platform: linux/amd64
-    container_name: vs
+    container_name: ${ZPR_CONTAINER_PREFIX:-}vs
     command: ["/bin/sh", "/entrypoint.sh"]
     cap_add: [NET_ADMIN]
     devices: ["/dev/net/tun"]
     privileged: true
     volumes:
       - ./local-compute/entrypoint-vs.sh:/entrypoint.sh:ro
-      - ./local-compute/conf/vs:/conf
-      - ./local-compute/logs:/logs
+      - ${ZPR_RUNTIME_ROOT:-./local-compute}/conf/vs:/conf
+      - ${ZPR_RUNTIME_ROOT:-./local-compute}/logs:/logs
     ports:
       - "127.0.0.1:8185:8183/tcp"
     networks:
       zpr-local:
         ipv4_address: 172.30.0.11
 
+  directory:
+    image: zpr-multinode-directory
+    platform: linux/amd64
+    profiles: ["organization"]
+    container_name: ${ZPR_CONTAINER_PREFIX:-}directory
+    volumes:
+      - ${ZPR_RUNTIME_ROOT:?ZPR_RUNTIME_ROOT must be set}/directory:/runtime
+      - ${ZPR_TRUSTED_SERVICE_BINARY:?ZPR_TRUSTED_SERVICE_BINARY must be set}:/app/bin/zpr-trusted-service:ro
+    environment:
+      ZPR_DIRECTORY_BASE_DN: ${ZPR_DIRECTORY_BASE_DN:-}
+      ZPR_DIRECTORY_IDENTITY_MAPPINGS: ${ZPR_DIRECTORY_IDENTITY_MAPPINGS:-}
+      ZPR_DIRECTORY_ATTRIBUTES: ${ZPR_DIRECTORY_ATTRIBUTES:-}
+    networks:
+      zpr-local:
+        ipv4_address: 172.30.0.16
+
   web1:
     image: zpr-multinode
     platform: linux/amd64
-    container_name: web1
+    container_name: ${ZPR_CONTAINER_PREFIX:-}web1
     command: ["/bin/sh", "/entrypoint.sh"]
     cap_add: [NET_ADMIN]
     devices: ["/dev/net/tun"]
     privileged: true
     volumes:
       - ./local-compute/entrypoint-web1.sh:/entrypoint.sh:ro
-      - ./local-compute/conf/web1:/conf
-      - ./local-compute/logs:/logs
+      - ${ZPR_RUNTIME_ROOT:-./local-compute}/conf/web1:/conf
+      - ${ZPR_RUNTIME_ROOT:-./local-compute}/logs:/logs
       # The docroot is container-local: entrypoint-web1.sh runs regen-banner.sh
       # into it continuously, and a bind mount would churn a repo file 5x/sec.
       # tools/ is mounted (not baked in) so the banner script stays editable
@@ -91,15 +109,15 @@ services:
   web0:
     image: zpr-multinode
     platform: linux/amd64
-    container_name: web0
+    container_name: ${ZPR_CONTAINER_PREFIX:-}web0
     command: ["/bin/sh", "/entrypoint.sh"]
     cap_add: [NET_ADMIN]
     devices: ["/dev/net/tun"]
     privileged: true
     volumes:
       - ./local-compute/entrypoint-web0.sh:/entrypoint.sh:ro
-      - ./local-compute/conf/web0:/conf
-      - ./local-compute/logs:/logs
+      - ${ZPR_RUNTIME_ROOT:-./local-compute}/conf/web0:/conf
+      - ${ZPR_RUNTIME_ROOT:-./local-compute}/logs:/logs
       - ./tools:/tools:ro
     networks:
       zpr-local:
@@ -107,7 +125,7 @@ services:
 
 networks:
   zpr-local:
-    name: zpr-local
+    name: ${ZPR_NETWORK_NAME:-zpr-local}
     ipam:
       config:
         - subnet: 172.30.0.0/24

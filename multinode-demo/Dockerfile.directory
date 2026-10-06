@@ -1,0 +1,14 @@
+FROM zpr-multinode
+
+USER root
+RUN DEBIAN_FRONTEND=noninteractive apt-get update && apt-get install -y --no-install-recommends \
+    ldap-utils \
+    procps \
+    slapd \
+    sudo \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY local-compute/entrypoint-directory.sh /entrypoint-directory.sh
+RUN chmod 755 /entrypoint-directory.sh
+
+ENTRYPOINT ["/entrypoint-directory.sh"]
