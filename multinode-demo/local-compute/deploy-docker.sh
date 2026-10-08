@@ -13,6 +13,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # local-compute/
 MULTI_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+ZPR_DOCS_ROOT="$(cd "$MULTI_DIR/../.." && pwd)"
 BIN_DIR="$MULTI_DIR/bin"
 CONF_TMPL="$MULTI_DIR/zpr-conf/confs"
 INC_DIR="$MULTI_DIR/zpr-conf/include"
@@ -34,7 +35,6 @@ fi
 ADMIN_RUNTIME="$RUNTIME_ROOT/admin"
 NODE_COMPOSE_OVERRIDE="$RUNTIME_ROOT/compose-nodes.json"
 COMPOSE=(docker compose --project-name "$COMPOSE_PROJECT" -f "$MULTI_DIR/docker-compose.yml")
-ZPR_DOCS_ROOT="$(cd "$MULTI_DIR/../.." && pwd)"
 DASHBOARD_DIR="${ZPR_DASHBOARD_DIR:-$ZPR_DOCS_ROOT/zpr-visaservice/zpr-dashboard}"
 ZPR_PKI_BIN="$ZPR_DOCS_ROOT/zpr-core/integration-test/lib/zpr-pki"
 ORGANIZATION_PROFILE="$DASHBOARD_DIR/cmd/zpr-web-dashboard/examples/organizations/$ORGANIZATION_ID.json"
@@ -195,11 +195,7 @@ if [ "$ORGANIZATION_ID" != multinode-demo ]; then
   smoke_role=${smoke_user_role#*:}
   export ZPR_DIRECTORY_SMOKE_MACHINE="$smoke_machine" ZPR_DIRECTORY_SMOKE_OWNER="$smoke_owner"
   export ZPR_DIRECTORY_SMOKE_USER="$smoke_user" ZPR_DIRECTORY_SMOKE_ROLE="$smoke_role"
-  mkdir -p "$(dirname "$TRUSTED_SERVICE_BINARY")"
-  if [ ! -x "$TRUSTED_SERVICE_BINARY" ]; then
-    GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go -C "$DASHBOARD_DIR" build -trimpath -o "$TRUSTED_SERVICE_BINARY" ./cmd/zpr-trusted-service
-  fi
-  chmod 755 "$TRUSTED_SERVICE_BINARY"
+  sh "$DASHBOARD_DIR/scripts/prepare-trusted-service.sh"
   base_dn=$(jq -er '.directory.base_dn' "$ORGANIZATION_PROFILE")
   admin_dn="cn=admin,$base_dn"
   reader_dn="cn=zpr-reader,ou=Service Accounts,$base_dn"
@@ -212,9 +208,16 @@ pidfile /runtime/slapd.pid
 argsfile /runtime/slapd.args
 modulepath /usr/lib/ldap
 moduleload back_mdb
+moduleload accesslog
 TLSCACertificateFile /runtime/ca.crt
 TLSCertificateFile /runtime/ldap.crt
 TLSCertificateKeyFile /runtime/ldap.key
+database mdb
+maxsize 268435456
+suffix "cn=accesslog"
+directory /runtime/accesslog
+index reqStart eq
+access to * by dn.exact="$admin_dn" read by dn.exact="$reader_dn" read by * none
 database mdb
 maxsize 1073741824
 suffix "$base_dn"
@@ -223,6 +226,11 @@ rootdn "$admin_dn"
 rootpw @@ADMIN_PASSWORD_HASH@@
 access to attrs=userPassword by self write by anonymous auth by dn.exact="$admin_dn" write by dn.exact="$reader_dn" read by * none
 access to * by dn.exact="$admin_dn" write by dn.exact="$reader_dn" read by users read by * none
+overlay accesslog
+logdb "cn=accesslog"
+logops writes
+logsuccess TRUE
+logpurge 07+00:00 01+00:00
 EOF
   docker build --platform linux/amd64 -t zpr-multinode-directory -f "$MULTI_DIR/Dockerfile.directory" "$MULTI_DIR"
   if [ "$ACTION" = validate ]; then
@@ -241,7 +249,7 @@ EOF
 fi
 
 write_node_compose_override() {
-  node_data=$(jq -ce '.runtime.nodes | select(length >= 2 and length <= 32) | if all(.[]; (.substrate_address | type == "string") and (.zpr_address | type == "string")) then . else error("every multinode entry requires substrate_address and zpr_address") end' "$ORGANIZATION_PROFILE")
+  node_data=$(jq -ce '.runtime.nodes | select(length >= 1 and length <= 32) | if all(.[]; (.substrate_address | type == "string") and (.zpr_address | type == "string")) then . else error("every Compose node requires substrate_address and zpr_address") end' "$ORGANIZATION_PROFILE")
   temporary_override="$NODE_COMPOSE_OVERRIDE.tmp.$$"
   jq -n \
     --arg prefix "$CONTAINER_PREFIX" \
@@ -264,7 +272,7 @@ if [ "$ORGANIZATION_ID" = multinode-demo ]; then
 elif [ "$organization_driver" = docker-multinode ]; then
   node_count=$(jq -er '.runtime.nodes | length' "$ORGANIZATION_PROFILE")
   NODE0_ADDR=$(jq -er '.runtime.nodes[0].substrate_address' "$ORGANIZATION_PROFILE")
-  NODE1_ADDR=$(jq -er '.runtime.nodes[1].substrate_address' "$ORGANIZATION_PROFILE")
+  NODE1_ADDR=$(jq -er '.runtime.nodes[1].substrate_address // .runtime.nodes[0].substrate_address' "$ORGANIZATION_PROFILE")
   write_node_compose_override
 fi
 NODE1_EXT_ADDR="${NODE1_EXT_ADDR:-127.0.0.1}" # host-side bob adapter only
@@ -284,7 +292,7 @@ render() {  # $1=template path  $2=output path
 }
 
 prepare_organization_nodes() {
-  local node_count index peer_index node_json node_ip node_zpr node_name peer_json peer_ip peer_zpr peer_name
+  local node_count index peer_index node_json node_ip node_zpr node_name peer_json peer_ip peer_zpr peer_name link_id
   local pregen organization_include node_config
   node_count=$(jq -er '.runtime.nodes | length' "$ORGANIZATION_PROFILE")
   pregen="$ZPR_DOCS_ROOT/.local-runtime/linux-integration/pregen"
@@ -297,6 +305,8 @@ prepare_organization_nodes() {
   for key_file in client-finance-rsa-pubkey.pem client-operations-rsa-pubkey.pem client-telemetry-rsa-pubkey.pem service-echo-rsa-pubkey.pem service-metrics-rsa-pubkey.pem internet-gateway-rsa-pubkey.pem; do
     cp "$pregen/$key_file" "$organization_include/$key_file"
   done
+  cp "$pregen/actor1-rsa.key" "$organization_include/actor1-rsa.key"
+  cp "$pregen/actor1.pem" "$organization_include/actor1.pem"
   cp "$pregen/machine-control/simulator-control.pub.pem" "$organization_include/simulator-control.pub.pem"
   for number in $(seq -w 1 20); do
     cp "$pregen/machine-control/machine-$number.pub.pem" "$organization_include/machine-$number.pub.pem"
@@ -333,7 +343,6 @@ auth_private_key = "include/node$index-private-key.pem"
 [node]
 advertised_substrate_addr = "$node_ip:5000"
 local_vs_dock = $([ "$index" -eq 0 ] && printf true || printf false)
-
 [node.peer_noise_certificates]
 EOF
     for ((peer_index = 0; peer_index < node_count; peer_index++)); do
@@ -347,12 +356,13 @@ EOF
       peer_json=$(jq -ce --argjson index "$peer_index" '.runtime.nodes[$index]' "$ORGANIZATION_PROFILE")
       peer_ip=$(jq -er '.substrate_address' <<< "$peer_json")
       peer_zpr=$(jq -er '.zpr_address' <<< "$peer_json")
+      if ((index < peer_index)); then link_id="n${index}n${peer_index}"; else link_id="n${peer_index}n${index}"; fi
       cat >> "$node_config" <<EOF
 
 [[node.peers]]
 zpr_addr = "$peer_zpr"
 substrate_addr = "$peer_ip:5000"
-link_id = "n${index}n${peer_index}"
+link_id = "$link_id"
 EOF
     done
   done
@@ -361,6 +371,21 @@ EOF
     mkdir -p "$container/include"
     cp -R "$organization_include/." "$container/include/"
   done
+  dns_node_address=$(jq -er '.runtime.nodes[0].substrate_address' "$ORGANIZATION_PROFILE")
+  cat > "$CONF_ROOT/node0/adapter-dns-conf.toml" <<EOF
+[global]
+ca_file = "include/auth-ca.crt"
+zpr_addr = [ "fd00:1:1::1" ]
+ tun_if = "tun6"
+control_path = "/var/run/zpr/adapter1.sock"
+capture_path = "/var/run/zpr/adapter1-cap.sock"
+
+[adapter]
+name = "adapter1"
+node_addr = "$dns_node_address:5000"
+node_public_key_file = "include/node0-noise-pub.pem"
+bootstrap_key = "include/actor1-rsa.key"
+EOF
 }
 
 write_organization_policy_config() {
@@ -392,6 +417,9 @@ EOF
     done
   done
   cat >> "$ADMIN_RUNTIME/multinode-demo.zplc" <<'EOF'
+[visa_service]
+dock_node = "n0"
+
 [trusted_services.default]
 
 [trusted_services.attrfile]
@@ -417,6 +445,7 @@ EOF
 "metrics-service" = "/runtime-include/service-metrics-rsa-pubkey.pem"
 "internet-gateway" = "/runtime-include/internet-gateway-rsa-pubkey.pem"
 "simulator-control" = "/runtime-include/simulator-control.pub.pem"
+"adapter1" = "/runtime-include/actor1.pem"
 EOF
   for number in $(seq -w 1 20); do
     printf '"machine-%s" = "/runtime-include/machine-%s.pub.pem"\n' "$number" "$number" >> "$ADMIN_RUNTIME/multinode-demo.zplc"
@@ -436,6 +465,31 @@ provider = [["device.zpr.adapter.cn", "ociweb.demo"], ["zpr.addr", "fd5a:5052:88
 protocol = "http"
 port = "80"
 provider = [["device.zpr.adapter.cn", "premweb.demo"], ["zpr.addr", "fd5a:5052:8888::9"]]
+
+[protocols.simulator-control]
+l4protocol = "TCP"
+port = 8792
+
+[services.SimulatorControlService]
+protocol = "simulator-control"
+port = "8792"
+provider = [["device.zpr.adapter.cn", "simulator-control"], ["zpr.addr", "fd5a:5052:adda:1:ffff:ffff:ffff:fffe"]]
+
+[protocols.dns]
+l4protocol = "TCP"
+port = 53
+
+[services.ZprDNS]
+protocol = "dns"
+port = "53"
+provider = [["device.zpr.adapter.cn", "adapter1"], ["zpr.addr", "fd00:1:1::1"]]
+
+[protocols.tcp_443]
+l4protocol = "iana.TCP"
+port = 443
+
+[services.VisaService]
+protocol = "tcp_443"
 EOF
 }
 
@@ -464,13 +518,45 @@ render "$CONF_TMPL/adapter-vs-conf.toml.template"   "$CONF_ROOT/vs/adapter-vs-co
 render "$CONF_TMPL/adapter-web1-conf.toml.template" "$CONF_ROOT/web1/adapter-web1-conf.toml"
 render "$CONF_TMPL/adapter-alice-local-conf.toml.template" "$CONF_ROOT/alice/adapter-alice-conf.toml"
 cp "$SCRIPT_DIR/vs.toml" "$CONF_ROOT/vs/vs.toml"
+if [ "$ORGANIZATION_ID" != multinode-demo ]; then
+  jq -r -f "$DASHBOARD_DIR/scripts/render-node-geography.jq" "$ORGANIZATION_PROFILE" >> "$CONF_ROOT/vs/vs.toml"
+fi
 cp "$ADMIN/attrfile.json" "$CONF_ROOT/vs/attrfile.json"   # policy attributes, read by vs
+if [ -r "$ZPR_DOCS_ROOT/.local-runtime/linux-integration/pregen/demo_file.json" ]; then
+  cp "$ZPR_DOCS_ROOT/.local-runtime/linux-integration/pregen/demo_file.json" "$CONF_ROOT/vs/demo_file.json"
+fi
 cp "$CONF_TMPL/zpr-dashboard-config.toml" "$CONF_ROOT/vs/config.toml"  # zpr-dashboard reads ./config.toml
 if [ "$ORGANIZATION_ID" != multinode-demo ]; then
   cp "$DIRECTORY_ROOT/ca.crt" "$CONF_ROOT/vs/organization-directory-ca.crt"
   cp "$DIRECTORY_ROOT/visa-client.crt" "$CONF_ROOT/vs/organization-directory-client.crt"
   cp "$DIRECTORY_ROOT/visa-client.key" "$CONF_ROOT/vs/organization-directory-client.key"
   chmod 600 "$CONF_ROOT/vs/organization-directory-client.key"
+  if [ "$ORGANIZATION_ID" = "great-lakes" ]; then
+    cat >> "$CONF_ROOT/vs/vs.toml" <<EOF
+
+[trusted_service_http.great_lakes_ldap]
+url = "https://directory:8443"
+ca_cert = "/conf/organization-directory-ca.crt"
+client_cert = "/conf/organization-directory-client.crt"
+client_key = "/conf/organization-directory-client.key"
+EOF
+  fi
+  if [ "$ORGANIZATION_ID" = "northstar" ]; then
+    cat >> "$CONF_ROOT/vs/vs.toml" <<EOF
+
+[trusted_service_http.demo_ldap]
+url = "https://directory:8443"
+ca_cert = "/conf/organization-directory-ca.crt"
+client_cert = "/conf/organization-directory-client.crt"
+client_key = "/conf/organization-directory-client.key"
+
+[trusted_service_http.demo_user_ldap]
+url = "https://directory:8443"
+ca_cert = "/conf/organization-directory-ca.crt"
+client_cert = "/conf/organization-directory-client.crt"
+client_key = "/conf/organization-directory-client.key"
+EOF
+  fi
   cat >> "$CONF_ROOT/vs/vs.toml" <<EOF
 
 [trusted_service_http.redwood_directory]
@@ -520,6 +606,15 @@ api = "rest/1"
 returns_attributes = ["cn -> user.name", "mail -> user.email", "ou -> user.department", "title -> user.title", "l -> user.location", "role -> user.role{}"]
 expiration_seconds = 3600
 EOF
+  if [ "$ORGANIZATION_ID" = "great-lakes" ]; then
+    cat >> "$ADMIN_RUNTIME/multinode-demo.zplc" <<'EOF'
+
+[trusted_services.great_lakes_ldap]
+api = "rest/1"
+returns_attributes = ["ou -> device.greatlakes.department", "zprMachineLocation -> device.greatlakes.location"]
+expiration_seconds = 3600
+EOF
+  fi
 fi
 if [ "$ORGANIZATION_ID" = multinode-demo ]; then
   docker run --rm --platform linux/amd64 \
@@ -636,8 +731,12 @@ for container in web0 web1; do
     && echo "[$container_id] nginx serving :80" \
     || { echo "ERROR: nginx not serving in $container_id" >&2; exit 1; }
 done
-launch web0 web0-adapter "env ZPR_ADAPTER_SERVICES=OciWeb /app/bin/ph adapter -c adapter-web0-conf.toml"
-wait_for_adapter node0 172.30.0.14
+if ((node_count > 1)); then
+  launch web0 web0-adapter "env ZPR_ADAPTER_SERVICES=OciWeb /app/bin/ph adapter -c adapter-web0-conf.toml"
+  wait_for_adapter node0 172.30.0.14
+else
+  echo "[web0] OciWeb smoke adapter skipped for single-node organization $ORGANIZATION_ID"
+fi
 if [[ "${START_PREMWEB_ADAPTER:-0}" == "1" ]]; then
   launch web1 web1-adapter "env ZPR_ADAPTER_SERVICES=PremWeb /app/bin/ph adapter -c adapter-web1-conf.toml"
   wait_for_adapter node1 172.30.0.12

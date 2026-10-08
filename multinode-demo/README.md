@@ -321,6 +321,15 @@ The directory service is attached only to that organization's private Compose
 network and publishes no host port. The generic `multinode-demo` deployment
 does not enable the directory sidecar.
 
+Organization runtime nodes may specify optional `latitude` and `longitude`
+together, within `[-90,90]` and `[-180,180]`. Deployment renders them into the
+Visa Service's `[nodes."node0.demo"]` configuration, matching the generated node
+CNs by index. Bundled organizations provide approximate simulation coordinates;
+`coordinate_note` records each guess or city-center approximation, not a real
+company address. Control Room receives coordinates through the Visa Service
+Admin API, never by reading Simulator profiles. Re-deploy to update an existing
+runtime; changing a seed profile alone does not change a running service.
+
 Use the deployer's `validate` action to seed the selected organization's private
 directory and test LDAPS plus mTLS device-owner and user-role lookups without
 starting or stopping a ZPR Compose runtime. For multi-node profiles it also

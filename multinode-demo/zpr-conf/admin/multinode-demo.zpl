@@ -1,13 +1,13 @@
 # http://ociweb.demo
-Define OciWeb as a service.
+Define OciWeb as a service with device.zpr.adapter.cn:'ociweb.demo'.
 
 # http://premweb.demo
-Define PremWeb as a service.
+Define PremWeb as a service with device.zpr.adapter.cn:'premweb.demo'.
 
-service OciWeb as json {"service_class":"OciWeb"}.
-  allow access:cloud users to access services.
-  allow access:all users to access services.
+provide OciWeb at ociweb.demo over TCP 80.
+  allow access:cloud users.
+  allow access:all users.
 
-service PremWeb as json {"service_class":"PremWeb"}.
-  allow access:onprem users to access services.
-  allow access:all users to access services.
+provide PremWeb at premweb.demo over TCP 80.
+  allow access:onprem users.
+  allow access:all users.
