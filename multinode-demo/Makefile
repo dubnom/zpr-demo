@@ -13,8 +13,11 @@ linux-amd64: check-zpr-root
 	mkdir -p bin
 	cd "$(ZPR_ROOT)/zpr-visaservice/zpr-dashboard" && \
 		GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath \
-		-ldflags '-s -w' -o bin/zpr-dashboard ./cmd/zpr-dashboard
-	cp "$(ZPR_ROOT)/zpr-visaservice/zpr-dashboard/bin/zpr-dashboard" bin/
+		-ldflags '-s -w' -o bin/zpr-dashboard ./cmd/zpr-dashboard && \
+		GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath \
+		-ldflags '-s -w' -o bin/zpr-web-dashboard ./cmd/zpr-web-dashboard
+	cp "$(ZPR_ROOT)/zpr-visaservice/zpr-dashboard/bin/zpr-dashboard" \
+		"$(ZPR_ROOT)/zpr-visaservice/zpr-dashboard/bin/zpr-web-dashboard" bin/
 
 check-zpr-root:
 	@test -n "$(ZPR_ROOT)" || { \

@@ -123,6 +123,25 @@ services:
       zpr-local:
         ipv4_address: 172.30.0.14
 
+  internet-gateway:
+    profiles: ["web-gateway"]
+    image: zpr-multinode
+    platform: linux/amd64
+    container_name: ${ZPR_CONTAINER_PREFIX:-}internet-gateway
+    command: ["/bin/sh", "/entrypoint.sh"]
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun"]
+    privileged: true
+    environment:
+      ZPR_GATEWAY_ALLOWED_HOSTS: ${ZPR_GATEWAY_ALLOWED_HOSTS:-}
+      ZPR_GATEWAY_NODE_ADDRESS: ${ZPR_GATEWAY_NODE_ADDRESS:-}
+    volumes:
+      - ./local-compute/entrypoint-internet-gateway.sh:/entrypoint.sh:ro
+      - ${ZPR_RUNTIME_ROOT:?ZPR_RUNTIME_ROOT must be set}/conf/internet-gateway:/conf:ro
+      - ${ZPR_RUNTIME_ROOT:?ZPR_RUNTIME_ROOT must be set}/logs:/logs
+    networks:
+      zpr-local: {}
+
 networks:
   zpr-local:
     name: ${ZPR_NETWORK_NAME:-zpr-local}

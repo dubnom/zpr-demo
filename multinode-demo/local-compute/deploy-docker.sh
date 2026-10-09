@@ -46,6 +46,16 @@ if [ "$ORGANIZATION_ID" = multinode-demo ]; then
 else
   COMPOSE+=(--profile organization)
 fi
+gateway_enabled=no
+if [ "$ORGANIZATION_ID" != multinode-demo ] && [ -r "$ORGANIZATION_PROFILE" ] &&
+  jq -e '.web_gateway.allowed_hosts | type == "array" and length > 0' "$ORGANIZATION_PROFILE" >/dev/null; then
+  gateway_enabled=yes
+  COMPOSE+=(--profile web-gateway)
+  export ZPR_GATEWAY_ALLOWED_HOSTS
+  ZPR_GATEWAY_ALLOWED_HOSTS=$(jq -er '.web_gateway.allowed_hosts | join(",")' "$ORGANIZATION_PROFILE")
+  export ZPR_GATEWAY_NODE_ADDRESS
+  ZPR_GATEWAY_NODE_ADDRESS=$(jq -er '.runtime.nodes[0].substrate_address' "$ORGANIZATION_PROFILE")
+fi
 if [[ "$ACTION" == stop || "$ACTION" == status ]] && [ -r "$NODE_COMPOSE_OVERRIDE" ]; then
   COMPOSE+=(-f "$NODE_COMPOSE_OVERRIDE")
 fi
@@ -367,7 +377,7 @@ EOF
     done
   done
 
-  for container in "$CONF_ROOT"/node* "$CONF_ROOT/vs" "$CONF_ROOT/web0" "$CONF_ROOT/web1" "$CONF_ROOT/alice"; do
+  for container in "$CONF_ROOT"/node* "$CONF_ROOT/vs" "$CONF_ROOT/web0" "$CONF_ROOT/web1" "$CONF_ROOT/alice" "$CONF_ROOT/internet-gateway"; do
     mkdir -p "$container/include"
     cp -R "$organization_include/." "$container/include/"
   done
@@ -497,7 +507,7 @@ EOF
 rm -rf "$CONF_ROOT"
 mkdir -p "$ADMIN_RUNTIME"
 cp "$ADMIN/multinode-demo.zpl" "$ADMIN_RUNTIME/multinode-demo.zpl"
-mkdir -p "$CONF_ROOT"/{vs,web0,web1,alice} "$BOB_DIR" "$LOGS_DIR"
+mkdir -p "$CONF_ROOT"/{vs,web0,web1,alice,internet-gateway} "$BOB_DIR" "$LOGS_DIR"
 if [ "$ORGANIZATION_ID" = multinode-demo ]; then
   mkdir -p "$CONF_ROOT"/{node0,node1}
   for c in node0 node1 vs web0 web1 alice; do cp -R "$INC_DIR" "$CONF_ROOT/$c/include"; done
@@ -509,7 +519,7 @@ else
   done
   prepare_organization_nodes
 fi
-for c in vs web0 web1 alice; do
+for c in vs web0 web1 alice internet-gateway; do
   mkdir -p "$CONF_ROOT/$c/include"
   if [ "$ORGANIZATION_ID" = multinode-demo ]; then cp -R "$INC_DIR/." "$CONF_ROOT/$c/include/"; fi
 done
@@ -517,6 +527,11 @@ render "$CONF_TMPL/adapter-web0-conf.toml.template" "$CONF_ROOT/web0/adapter-web
 render "$CONF_TMPL/adapter-vs-conf.toml.template"   "$CONF_ROOT/vs/adapter-vs-conf.toml"
 render "$CONF_TMPL/adapter-web1-conf.toml.template" "$CONF_ROOT/web1/adapter-web1-conf.toml"
 render "$CONF_TMPL/adapter-alice-local-conf.toml.template" "$CONF_ROOT/alice/adapter-alice-conf.toml"
+if [ "$gateway_enabled" = yes ]; then
+  cp "$ZPR_DOCS_ROOT/.local-runtime/linux-integration/pregen/internet-gateway-rsa.key" \
+    "$CONF_ROOT/internet-gateway/internet-gateway-rsa.key"
+  chmod 600 "$CONF_ROOT/internet-gateway/internet-gateway-rsa.key"
+fi
 cp "$SCRIPT_DIR/vs.toml" "$CONF_ROOT/vs/vs.toml"
 if [ "$ORGANIZATION_ID" != multinode-demo ]; then
   jq -r -f "$DASHBOARD_DIR/scripts/render-node-geography.jq" "$ORGANIZATION_PROFILE" >> "$CONF_ROOT/vs/vs.toml"
@@ -742,6 +757,29 @@ if [[ "${START_PREMWEB_ADAPTER:-0}" == "1" ]]; then
   wait_for_adapter node1 172.30.0.12
 else
   echo "[web1] PremWeb ZPR adapter skipped (set START_PREMWEB_ADAPTER=1 to enable)"
+fi
+if [ "$gateway_enabled" = yes ]; then
+  gateway_container=$(container_name internet-gateway)
+  gateway_substrate=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$gateway_container")
+  [ -n "$gateway_substrate" ] || { echo "internet gateway container has no substrate address" >&2; exit 1; }
+  wait_for_adapter node0 "$gateway_substrate"
+  gateway_address=$(docker exec "$gateway_container" ip -6 -o addr show dev tun10 scope global | awk '$4 ~ /^fd5a:5052:adda:1:/ { split($4, address, "/"); print address[1]; exit }')
+  [ -n "$gateway_address" ] || { echo "Visa-assigned Gateway ZPR address unavailable" >&2; exit 1; }
+  gateway_ready=no
+  for _ in $(seq 30); do
+    if docker exec "$gateway_container" curl -g -fsS --connect-timeout 1 --max-time 3 \
+      "http://[$gateway_address]:8082/health" >/dev/null 2>&1; then
+      gateway_ready=yes
+      break
+    fi
+    sleep 1
+  done
+  if [ "$gateway_ready" != yes ]; then
+    docker logs "$gateway_container" >&2 || true
+    echo "organization web gateway did not become ready: $ORGANIZATION_ID" >&2
+    exit 1
+  fi
+  echo "[$gateway_container] allowlisted web gateway ready on internet-gateway.svc.zpr:8082"
 fi
 if [ "$ORGANIZATION_ID" = multinode-demo ]; then
   launch alice alice-adapter "/app/bin/ph adapter -c adapter-alice-conf.toml"
