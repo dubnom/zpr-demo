@@ -7,7 +7,7 @@
 #
 #   ./deploy-docker.sh
 #
-# Re-runnable: re-renders/recompiles every run, kills old tmux sessions first.
+# Re-runnable: retains identities, API credentials and the active Visa database.
 # Needs the Linux image built (`docker build --platform linux/amd64 -t zpr-multinode .` in ..).
 set -euo pipefail
 
@@ -19,6 +19,8 @@ CONF_TMPL="$MULTI_DIR/zpr-conf/confs"
 INC_DIR="$MULTI_DIR/zpr-conf/include"
 ADMIN="$MULTI_DIR/zpr-conf/admin"
 ACTION=${1:-deploy}
+umask 077
+source "$SCRIPT_DIR/runtime-state.sh"
 ORGANIZATION_ID=${ZPR_ORGANIZATION_ID:-multinode-demo}
 case "$ORGANIZATION_ID" in ''|*[!a-z0-9-]*) echo "invalid organization id: $ORGANIZATION_ID" >&2; exit 2 ;; esac
 if [ "$ORGANIZATION_ID" = multinode-demo ]; then
@@ -64,6 +66,7 @@ CONF_ROOT="$RUNTIME_ROOT/conf"        # per-container /conf mounts
 BOB_DIR="$RUNTIME_ROOT/bob"        # bob = host-side operator client (not a container)
 LOGS_DIR="$RUNTIME_ROOT/logs"
 export ZPR_RUNTIME_ROOT="$RUNTIME_ROOT" ZPR_CONTAINER_PREFIX="$CONTAINER_PREFIX" ZPR_NETWORK_NAME="$NETWORK_NAME"
+container_name() { printf '%s%s' "$CONTAINER_PREFIX" "$1"; }
 
 case "$ACTION" in
   deploy) ;;
@@ -71,6 +74,12 @@ case "$ACTION" in
     [ "$ORGANIZATION_ID" != multinode-demo ] || { echo "validate requires an organization id" >&2; exit 2; }
     ;;
   stop)
+    COMPOSE+=(--profile directory-manager)
+    preserve_vs_database
+    if [ "$ORGANIZATION_ID" != multinode-demo ]; then
+      SIMULATION_ORGANIZATION_ID="$ORGANIZATION_ID" \
+        sh "$DASHBOARD_DIR/scripts/dashboard-stack.sh" stop-dns
+    fi
     "${COMPOSE[@]}" down
     if [ "$ORGANIZATION_ID" != multinode-demo ] && [ -r "$ORGANIZATION_PROFILE" ] && [ "$(jq -r '.runtime.driver' "$ORGANIZATION_PROFILE")" = docker-multinode ]; then
       node_count=$(jq -er '.runtime.nodes | length' "$ORGANIZATION_PROFILE")
@@ -83,6 +92,28 @@ case "$ACTION" in
   status) "${COMPOSE[@]}" ps; exit 0 ;;
   *) echo "usage: $0 [deploy|validate|stop|status]" >&2; exit 2 ;;
 esac
+
+if [ "$ACTION" = validate ]; then
+  RUNTIME_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/zpr-organization-validation.XXXXXX")
+  trap 'rm -rf "$RUNTIME_ROOT"' EXIT
+  ADMIN_RUNTIME="$RUNTIME_ROOT/admin"
+  NODE_COMPOSE_OVERRIDE="$RUNTIME_ROOT/compose-nodes.json"
+  CONF_ROOT="$RUNTIME_ROOT/conf"
+  BOB_DIR="$RUNTIME_ROOT/bob"
+  LOGS_DIR="$RUNTIME_ROOT/logs"
+  DIRECTORY_ROOT="$RUNTIME_ROOT/directory"
+  export ZPR_RUNTIME_ROOT="$RUNTIME_ROOT"
+else
+  preserve_vs_database
+  existing_runtime=no
+  if [ -s "$CONF_ROOT/vs/vs_keys.toml" ]; then existing_runtime=yes; fi
+  if [ -s "$CONF_ROOT/vs/vs_keys.toml" ] &&
+     [ ! -s "$RUNTIME_ROOT/state/redis/dump.rdb" ] &&
+     [ ! -s "$RUNTIME_ROOT/state/redis/appendonlydir/appendonly.aof.manifest" ]; then
+    echo "existing Visa runtime has no recoverable database; refusing policy reset" >&2
+    exit 1
+  fi
+fi
 
 if [ "$ORGANIZATION_ID" != multinode-demo ]; then
   [ -r "$ORGANIZATION_PROFILE" ] || { echo "organization profile missing: $ORGANIZATION_PROFILE" >&2; exit 1; }
@@ -272,8 +303,6 @@ write_node_compose_override() {
   COMPOSE+=(-f "$NODE_COMPOSE_OVERRIDE")
 }
 
-container_name() { printf '%s%s' "$CONTAINER_PREFIX" "$1"; }
-
 # --- Step 0: configured substrate addresses for organization nodes ---
 NODE0_ADDR="172.30.0.13"
 NODE1_ADDR="172.30.0.10"
@@ -308,9 +337,7 @@ prepare_organization_nodes() {
   pregen="$ZPR_DOCS_ROOT/.local-runtime/linux-integration/pregen"
   organization_include="$RUNTIME_ROOT/include"
   mkdir -p "$organization_include"
-  cp -R "$INC_DIR/." "$organization_include/"
-  openssl pkey -in "$INC_DIR/auth-ca.key" -passin pass:secret -out "$organization_include/auth-ca.key" >/dev/null 2>&1
-  chmod 600 "$organization_include/auth-ca.key"
+  copy_initial_include
 
   for key_file in client-finance-rsa-pubkey.pem client-operations-rsa-pubkey.pem client-telemetry-rsa-pubkey.pem service-echo-rsa-pubkey.pem service-metrics-rsa-pubkey.pem internet-gateway-rsa-pubkey.pem; do
     cp "$pregen/$key_file" "$organization_include/$key_file"
@@ -327,13 +354,7 @@ prepare_organization_nodes() {
     node_ip=$(jq -er '.substrate_address' <<< "$node_json")
     node_zpr=$(jq -er '.zpr_address' <<< "$node_json")
     node_name="node$index.demo"
-    openssl genrsa -out "$organization_include/node$index-private-key.pem" 2048 >/dev/null 2>&1
-    openssl rsa -in "$organization_include/node$index-private-key.pem" -pubout -out "$organization_include/node$index-public-key.pem" >/dev/null 2>&1
-    "$ZPR_PKI_BIN" genkey > "$organization_include/node$index-noise.key"
-    "$ZPR_PKI_BIN" pubkey < "$organization_include/node$index-noise.key" > "$organization_include/node$index-noise-pub.pem"
-    "$ZPR_PKI_BIN" gensignedcert "$organization_include/auth-ca.crt" "$organization_include/auth-ca.key" "/CN=$node_name" 365 \
-      < "$organization_include/node$index-noise-pub.pem" > "$organization_include/node$index-noise.crt"
-    chmod 600 "$organization_include/node$index-private-key.pem" "$organization_include/node$index-noise.key"
+    ensure_node_identity "$organization_include" "$index"
 
     node_config="$CONF_ROOT/node$index/node$index-conf.toml"
     cat > "$node_config" <<EOF
@@ -504,7 +525,6 @@ EOF
 }
 
 # --- Step 1: assemble per-container /conf dirs (rendered config + whole include/) ---
-rm -rf "$CONF_ROOT"
 mkdir -p "$ADMIN_RUNTIME"
 cp "$ADMIN/multinode-demo.zpl" "$ADMIN_RUNTIME/multinode-demo.zpl"
 mkdir -p "$CONF_ROOT"/{vs,web0,web1,alice,internet-gateway} "$BOB_DIR" "$LOGS_DIR"
@@ -590,15 +610,14 @@ fi
 
 # bob, the host-side operator client (stays on host, next to client.key)
 render "$CONF_TMPL/adapter-bob-conf.toml.template" "$BOB_DIR/adapter-bob-conf.toml"
-ln -sfn "$INC_DIR" "$BOB_DIR/include"
+if [ "$ORGANIZATION_ID" = multinode-demo ]; then
+  ln -sfn "$INC_DIR" "$BOB_DIR/include"
+else
+  ln -sfn "$RUNTIME_ROOT/include" "$BOB_DIR/include"
+fi
 
 # --- Step 2 (§7.3): vs_keys.toml + client.key ---
-rm -f "$CONF_ROOT/vs/vs_keys.toml"
-docker run --rm --platform linux/amd64 -v "$CONF_ROOT/vs:/conf" zpr-multinode \
-  /app/bin/vsapikey create --init readwrite client /conf/vs_keys.toml > "$BOB_DIR/client.key"
-docker run --rm --platform linux/amd64 -v "$CONF_ROOT/vs:/conf" zpr-multinode \
-  /app/bin/vsapikey create read web-monitor /conf/vs_keys.toml > "$BOB_DIR/web-monitor.key"
-chmod 600 "$BOB_DIR/client.key" "$BOB_DIR/web-monitor.key"
+ensure_api_credentials
 echo "operator key written to $BOB_DIR/client.key"
 echo "read-only monitor key written to $BOB_DIR/web-monitor.key"
 
@@ -677,6 +696,7 @@ if [ "$ORGANIZATION_ID" != multinode-demo ]; then
     echo "organization LDAP or trusted service did not become ready: $ORGANIZATION_ID" >&2
     exit 1
   fi
+  sh "$SCRIPT_DIR/start-directory-manager.sh"
 fi
 # tee to a mounted /logs file so output survives the tmux session dying.
 launch() {  # $1=container $2=session/logname $3=command(run with cwd /conf)
@@ -722,10 +742,13 @@ wait_for_adapter() { # $1=node container $2=adapter substrate address
   return 1
 }
 
+policy_exists=$(docker exec "$(container_name vs)" redis-cli --raw EXISTS policy:current)
+vs_command=$(visa_start_command "$policy_exists")
+wait_for_visa_lease "$(container_name vs)"
+launch vs vs "$vs_command"
 for ((index = 0; index < node_count; index++)); do
   launch "node$index" "node$index" "/app/bin/ph node -c node$index-conf.toml"
 done
-launch vs vs "/app/bin/vs --clear-state multinode-demo.bin2"
 launch vs vs-adapter "/app/bin/ph adapter -c adapter-vs-conf.toml"
 
 for ((index = 0; index < node_count; index++)); do
@@ -760,10 +783,19 @@ else
 fi
 if [ "$gateway_enabled" = yes ]; then
   gateway_container=$(container_name internet-gateway)
+  docker restart "$gateway_container" >/dev/null
   gateway_substrate=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$gateway_container")
+  case "$gateway_substrate" in ''|*[!0-9.]*) echo "internet gateway has no valid IPv4 substrate address" >&2; exit 1 ;; esac
   [ -n "$gateway_substrate" ] || { echo "internet gateway container has no substrate address" >&2; exit 1; }
   wait_for_adapter node0 "$gateway_substrate"
-  gateway_address=$(docker exec "$gateway_container" ip -6 -o addr show dev tun10 scope global | awk '$4 ~ /^fd5a:5052:adda:1:/ { split($4, address, "/"); print address[1]; exit }')
+  gateway_address=
+  for _ in $(seq 30); do
+    if gateway_address=$(docker exec "$gateway_container" ip -6 -o addr show dev tun10 scope global | awk '$4 ~ /^fd5a:5052:adda:1:/ { split($4, address, "/"); print address[1]; exit }') &&
+       [ -n "$gateway_address" ]; then
+      break
+    fi
+    sleep 1
+  done
   [ -n "$gateway_address" ] || { echo "Visa-assigned Gateway ZPR address unavailable" >&2; exit 1; }
   gateway_ready=no
   for _ in $(seq 30); do
@@ -800,6 +832,12 @@ if [ "$ORGANIZATION_ID" = multinode-demo ]; then
   echo "[alice] OciWeb reachable across node0-node1"
 else
   echo "[alice] generic OciWeb smoke skipped for organization profile $ORGANIZATION_ID"
+fi
+
+if [ "$ORGANIZATION_ID" != multinode-demo ] &&
+   [ ! -f "$RUNTIME_ROOT/policy-bootstrap-required" ]; then
+  SIMULATION_ORGANIZATION_ID="$ORGANIZATION_ID" \
+    sh "$DASHBOARD_DIR/scripts/dashboard-stack.sh" start-dns
 fi
 
 cat <<EOF

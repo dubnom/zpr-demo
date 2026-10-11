@@ -71,6 +71,63 @@ produces ELF binaries usable by the Ubuntu containers and OCI hosts, including
 when building from Apple Silicon. The build includes `ph-cli`, which the remote
 deploy uses to verify the peer link.
 
+### Organization runtime lifecycle (local Docker)
+
+Each organization deployment starts a separate phpLDAPadmin directory manager
+connected over verified LDAPS to that organization's `directory` container.
+Its HTTP listener is published only on host loopback, on a Docker-assigned port
+so different organizations do not share a manager or collide on a fixed port.
+The manager requires a separate LDAP admin login; it does not prefill or mount
+the admin password. The local admin DN is `cn=admin,<directory base DN>`, with
+the password stored in the organization's private `directory/ldap-admin-password`.
+
+Deployment registers its browser URL for every trusted-service name targeting
+`https://directory:8443` in the rendered Visa configuration. Registration merges
+into `.local-runtime/dashboard-stack/provider-managers.json`, preserving other
+trusted sources. Set `ZPR_PROVIDER_MANAGER_URLS_FILE` consistently on deployment
+and the operator launcher to use a different registry. Control-Service loads
+this independent operator configuration at startup, not Simulator profiles or
+APIs; restart it after registration. Stopping an organization stops its manager,
+but does not affect managers belonging to other sources.
+
+To add or restart only the manager for an already-running organization, without
+redeploying LDAP or the Visa Service:
+
+```sh
+ZPR_RUNTIME_ROOT=/absolute/path/to/organization/runtime \
+ZPR_CONTAINER_PREFIX=great-lakes- ZPR_NETWORK_NAME=zpr-great-lakes \
+sh local-compute/start-directory-manager.sh
+```
+
+Organization `deploy` and `stop` preserve generated RSA/Noise identities, Visa
+API credentials and the active Visa policy database. Redis uses the
+organization's `state/redis` bind mount with durable AOF writes. Before replacing
+an older, non-persistent Visa container, the launcher exports its database; an
+unrecoverable stopped database fails deployment instead of silently restoring
+the demo policy. Reconnects use the Packet Handler's fresh-session recovery.
+
+First activation installs the composed policy using the deployed keys.
+Subsequent activations/redeploys load the persisted policy without `--clear-state`
+or an initial-policy override. **Restore base** is the explicit destructive
+operation; activation backs up the Visa database alongside policy/directory
+state before resetting. Partial or mismatched node identities and incomplete
+API credentials fail preflight rather than triggering key rotation.
+
+Organization redeploy also rebuilds the Simulator DNS binding against the
+current node0 container and checks service records. Stop removes that binding
+before removing its node. DNS zones and TSIG credentials remain organization
+scoped. These organization orchestration operations use the Simulator's local
+DNS/relay launcher; they do not introduce a Simulator dependency into production
+Control Room or Control-Service.
+
+`validate` prepares artifacts in an isolated temporary runtime, never in an
+existing organization's live configuration. Run the lifecycle regression tests
+from the sibling dashboard checkout:
+
+```sh
+go test ./cmd/zpr-web-dashboard -run 'TestOrganization(NodeIdentity|VisaStartup|APICredentials|DNS)'
+```
+
 ## How to install (OCI hosts)
 
 Brings up three Ubuntu 24.04 instances in OCI — SSH-reachable and able to reach

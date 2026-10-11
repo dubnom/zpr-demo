@@ -62,6 +62,7 @@ services:
     volumes:
       - ./local-compute/entrypoint-vs.sh:/entrypoint.sh:ro
       - ${ZPR_RUNTIME_ROOT:-./local-compute}/conf/vs:/conf
+      - ${ZPR_RUNTIME_ROOT:-./local-compute}/state/redis:/state
       - ${ZPR_RUNTIME_ROOT:-./local-compute}/logs:/logs
     ports:
       - "127.0.0.1:8185:8183/tcp"
@@ -84,6 +85,20 @@ services:
     networks:
       zpr-local:
         ipv4_address: 172.30.0.16
+
+  directory-manager:
+    image: zpr-multinode-directory-manager
+    platform: linux/amd64
+    profiles: ["directory-manager"]
+    container_name: ${ZPR_CONTAINER_PREFIX:-}directory-manager
+    environment:
+      ZPR_DIRECTORY_BASE_DN: ${ZPR_DIRECTORY_BASE_DN:-}
+    volumes:
+      - ${ZPR_RUNTIME_ROOT:?ZPR_RUNTIME_ROOT must be set}/directory/ca.crt:/directory-ca.crt:ro
+    ports:
+      - "127.0.0.1::8080"
+    networks:
+      zpr-local: {}
 
   web1:
     image: zpr-multinode

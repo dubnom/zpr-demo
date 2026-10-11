@@ -1,0 +1,11 @@
+FROM zpr-multinode
+
+USER root
+RUN DEBIAN_FRONTEND=noninteractive apt-get update && apt-get install -y --no-install-recommends \
+    phpldapadmin \
+    php-cli \
+    php-ldap \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY local-compute/entrypoint-directory-manager.sh /entrypoint-directory-manager.sh
+ENTRYPOINT ["/bin/sh", "/entrypoint-directory-manager.sh"]
