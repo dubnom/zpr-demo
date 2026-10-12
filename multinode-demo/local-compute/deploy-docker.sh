@@ -8,7 +8,7 @@
 #   ./deploy-docker.sh
 #
 # Re-runnable: retains identities, API credentials and the active Visa database.
-# Needs the Linux image built (`docker build --platform linux/amd64 -t zpr-multinode .` in ..).
+# Needs the configured Linux infrastructure image built; see ../README.md.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # local-compute/
@@ -34,6 +34,19 @@ else
   NETWORK_NAME="zpr-$ORGANIZATION_ID"
   COMPOSE_PROJECT="zpr-$ORGANIZATION_ID"
 fi
+if [ -z "${ZPR_VS_ADMIN_PORT:-}" ]; then
+  if [ "$ORGANIZATION_ID" = multinode-demo ] || [ "$ORGANIZATION_ID" = load-lab ]; then
+    ZPR_VS_ADMIN_PORT=8185
+  else
+    ZPR_VS_ADMIN_PORT=8186
+  fi
+fi
+case "$ZPR_VS_ADMIN_PORT" in ''|*[!0-9]*) echo "invalid Visa admin port: $ZPR_VS_ADMIN_PORT" >&2; exit 2 ;; esac
+if ((ZPR_VS_ADMIN_PORT < 1 || ZPR_VS_ADMIN_PORT > 65535)); then
+  echo "invalid Visa admin port: $ZPR_VS_ADMIN_PORT" >&2
+  exit 2
+fi
+export ZPR_VS_ADMIN_PORT
 ADMIN_RUNTIME="$RUNTIME_ROOT/admin"
 NODE_COMPOSE_OVERRIDE="$RUNTIME_ROOT/compose-nodes.json"
 COMPOSE=(docker compose --project-name "$COMPOSE_PROJECT" -f "$MULTI_DIR/docker-compose.yml")
@@ -41,8 +54,31 @@ DASHBOARD_DIR="${ZPR_DASHBOARD_DIR:-$ZPR_DOCS_ROOT/zpr-visaservice/zpr-dashboard
 ZPR_PKI_BIN="$ZPR_DOCS_ROOT/zpr-core/integration-test/lib/zpr-pki"
 ORGANIZATION_PROFILE="$DASHBOARD_DIR/cmd/zpr-web-dashboard/examples/organizations/$ORGANIZATION_ID.json"
 DIRECTORY_ROOT="$RUNTIME_ROOT/directory"
-TRUSTED_SERVICE_BINARY="${ZPR_TRUSTED_SERVICE_BINARY:-$ZPR_DOCS_ROOT/.local-runtime/dashboard-stack/zpr-trusted-service-linux-amd64}"
+. "$DASHBOARD_DIR/scripts/multinode-platform.sh"
+configure_multinode_platform
+TRUSTED_SERVICE_BINARY="${ZPR_TRUSTED_SERVICE_BINARY:-$ZPR_DOCS_ROOT/.local-runtime/dashboard-stack/zpr-trusted-service-linux-$ZPR_MULTINODE_ARCH}"
 export ZPR_TRUSTED_SERVICE_BINARY="$TRUSTED_SERVICE_BINARY"
+ZPR_NETWORK_PREFIX=172.30.0
+if [ "$ORGANIZATION_ID" != multinode-demo ] && [ -r "$ORGANIZATION_PROFILE" ]; then
+  ZPR_NETWORK_PREFIX=$(jq -er '
+    [.runtime.nodes[].substrate_address] as $addresses
+    | if ($addresses | length) == 0 then error("organization has no substrate addresses")
+      else
+        ($addresses | map(
+          split(".") as $octets
+          | if ($octets | length) == 4 and all($octets[]; test("^[0-9]{1,3}$") and (tonumber <= 255))
+            then $octets[:3] | join(".")
+            else error("organization has an invalid IPv4 substrate address")
+            end
+        ) | unique) as $prefixes
+        | if ($prefixes | length) == 1 then $prefixes[0]
+          else error("organization nodes must share one /24 substrate subnet")
+          end
+      end
+  ' "$ORGANIZATION_PROFILE")
+fi
+ZPR_NETWORK_SUBNET="$ZPR_NETWORK_PREFIX.0/24"
+export ZPR_NETWORK_PREFIX ZPR_NETWORK_SUBNET
 if [ "$ORGANIZATION_ID" = multinode-demo ]; then
   COMPOSE+=(--profile legacy)
 else
@@ -93,6 +129,8 @@ case "$ACTION" in
   *) echo "usage: $0 [deploy|validate|stop|status]" >&2; exit 2 ;;
 esac
 
+verify_multinode_platform
+
 if [ "$ACTION" = validate ]; then
   RUNTIME_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/zpr-organization-validation.XXXXXX")
   trap 'rm -rf "$RUNTIME_ROOT"' EXIT
@@ -107,12 +145,7 @@ else
   preserve_vs_database
   existing_runtime=no
   if [ -s "$CONF_ROOT/vs/vs_keys.toml" ]; then existing_runtime=yes; fi
-  if [ -s "$CONF_ROOT/vs/vs_keys.toml" ] &&
-     [ ! -s "$RUNTIME_ROOT/state/redis/dump.rdb" ] &&
-     [ ! -s "$RUNTIME_ROOT/state/redis/appendonlydir/appendonly.aof.manifest" ]; then
-    echo "existing Visa runtime has no recoverable database; refusing policy reset" >&2
-    exit 1
-  fi
+  verify_vs_database_recovery
 fi
 
 if [ "$ORGANIZATION_ID" != multinode-demo ]; then
@@ -273,15 +306,16 @@ logops writes
 logsuccess TRUE
 logpurge 07+00:00 01+00:00
 EOF
-  docker build --platform linux/amd64 -t zpr-multinode-directory -f "$MULTI_DIR/Dockerfile.directory" "$MULTI_DIR"
+  docker build --platform "$ZPR_MULTINODE_PLATFORM" --build-arg "ZPR_MULTINODE_IMAGE=$ZPR_MULTINODE_IMAGE" \
+    -t "$ZPR_MULTINODE_DIRECTORY_IMAGE" -f "$MULTI_DIR/Dockerfile.directory" "$MULTI_DIR"
   if [ "$ACTION" = validate ]; then
-    docker run --rm --platform linux/amd64 --network none \
+    docker run --rm --platform "$ZPR_MULTINODE_PLATFORM" --network none \
       -e ZPR_DIRECTORY_BASE_DN -e ZPR_DIRECTORY_IDENTITY_MAPPINGS -e ZPR_DIRECTORY_ATTRIBUTES \
       -e ZPR_DIRECTORY_SMOKE_MACHINE -e ZPR_DIRECTORY_SMOKE_OWNER \
       -e ZPR_DIRECTORY_SMOKE_USER -e ZPR_DIRECTORY_SMOKE_ROLE -e ZPR_DIRECTORY_SMOKE_TEST=1 \
       -v "$DIRECTORY_ROOT:/runtime" \
       -v "$TRUSTED_SERVICE_BINARY:/app/bin/zpr-trusted-service:ro" \
-      zpr-multinode-directory
+      "$ZPR_MULTINODE_DIRECTORY_IMAGE"
     if [ "$organization_driver" != docker-multinode ]; then
       echo "Organization directory validated: $ORGANIZATION_ID"
       exit 0
@@ -296,8 +330,10 @@ write_node_compose_override() {
     --arg prefix "$CONTAINER_PREFIX" \
     --arg runtime "$RUNTIME_ROOT" \
     --arg entrypoint "$SCRIPT_DIR/entrypoint-node.sh" \
+    --arg image "$ZPR_MULTINODE_IMAGE" \
+    --arg platform "$ZPR_MULTINODE_PLATFORM" \
     --argjson nodes "$node_data" \
-    '{services: (reduce range(0; ($nodes | length)) as $index ({}; . + {("runtime-node-" + ($index | tostring)): {image: "zpr-multinode", platform: "linux/amd64", container_name: ($prefix + "node" + ($index | tostring)), command: ["/bin/sh", "/entrypoint.sh"], cap_add: ["NET_ADMIN"], devices: ["/dev/net/tun"], privileged: true, environment: {ZPR_NODE_ZPR_ADDRESS: $nodes[$index].zpr_address}, volumes: [($entrypoint + ":/entrypoint.sh:ro"), ($runtime + "/conf/node" + ($index | tostring) + ":/conf"), ($runtime + "/logs:/logs")], networks: {"zpr-local": {ipv4_address: $nodes[$index].substrate_address}}}}))}' \
+    '{services: (reduce range(0; ($nodes | length)) as $index ({}; . + {("runtime-node-" + ($index | tostring)): {image: $image, platform: $platform, container_name: ($prefix + "node" + ($index | tostring)), command: ["/bin/sh", "/entrypoint.sh"], cap_add: ["NET_ADMIN"], devices: ["/dev/net/tun"], privileged: true, environment: {ZPR_NODE_ZPR_ADDRESS: $nodes[$index].zpr_address}, volumes: [($entrypoint + ":/entrypoint.sh:ro"), ($runtime + "/conf/node" + ($index | tostring) + ":/conf"), ($runtime + "/logs:/logs")], networks: {"zpr-local": {ipv4_address: $nodes[$index].substrate_address}}}}))}' \
     > "$temporary_override"
   mv "$temporary_override" "$NODE_COMPOSE_OVERRIDE"
   COMPOSE+=(-f "$NODE_COMPOSE_OVERRIDE")
@@ -305,7 +341,7 @@ write_node_compose_override() {
 
 # --- Step 0: configured substrate addresses for organization nodes ---
 NODE0_ADDR="172.30.0.13"
-NODE1_ADDR="172.30.0.10"
+NODE1_ADDR="$ZPR_NETWORK_PREFIX.10"
 if [ "$ORGANIZATION_ID" = multinode-demo ]; then
   node_count=2
 elif [ "$organization_driver" = docker-multinode ]; then
@@ -504,7 +540,7 @@ port = 8792
 [services.SimulatorControlService]
 protocol = "simulator-control"
 port = "8792"
-provider = [["device.zpr.adapter.cn", "simulator-control"], ["zpr.addr", "fd5a:5052:adda:1:ffff:ffff:ffff:fffe"]]
+provider = [["device.zpr.adapter.cn", "simulator-control"]]
 
 [protocols.dns]
 l4protocol = "TCP"
@@ -651,15 +687,15 @@ EOF
   fi
 fi
 if [ "$ORGANIZATION_ID" = multinode-demo ]; then
-  docker run --rm --platform linux/amd64 \
+  docker run --rm --platform "$ZPR_MULTINODE_PLATFORM" \
     -v "$MULTI_DIR:/demo:ro" -v "$ADMIN_RUNTIME:/demo/zpr-conf/admin" \
-    -w /demo/zpr-conf/admin zpr-multinode \
+    -w /demo/zpr-conf/admin "$ZPR_MULTINODE_IMAGE" \
     /app/bin/zplc --config multinode-demo.zplc multinode-demo.zpl
 else
-  docker run --rm --platform linux/amd64 \
+  docker run --rm --platform "$ZPR_MULTINODE_PLATFORM" \
     -v "$MULTI_DIR:/demo:ro" -v "$ADMIN_RUNTIME:/demo/zpr-conf/admin" \
     -v "$RUNTIME_ROOT/include:/runtime-include:ro" \
-    -w /demo/zpr-conf/admin zpr-multinode \
+    -w /demo/zpr-conf/admin "$ZPR_MULTINODE_IMAGE" \
     /app/bin/zplc --config multinode-demo.zplc multinode-demo.zpl
 fi
 mv "$ADMIN_RUNTIME/multinode-demo.bin2" "$CONF_ROOT/vs/multinode-demo.bin2"
@@ -726,7 +762,7 @@ wait_for_peer() { # $1=local node container $2=expected substrate address
   return 1
 }
 
-wait_for_adapter() { # $1=node container $2=adapter substrate address
+wait_for_adapter() { # $1=node container $2=adapter substrate address $3=adapter log name
   local summary
   echo "[$1] waiting for adapter $2 to become Active"
   for _ in $(seq 30); do
@@ -738,7 +774,7 @@ wait_for_adapter() { # $1=node container $2=adapter substrate address
     sleep 2
   done
   echo "ERROR: [$1] adapter $2 did not become Active within 60 seconds" >&2
-  tail -n 80 "$LOGS_DIR/${1}-adapter.log" >&2 || true
+  tail -n 80 "$LOGS_DIR/$3.log" >&2 || true
   return 1
 }
 
@@ -771,13 +807,13 @@ for container in web0 web1; do
 done
 if ((node_count > 1)); then
   launch web0 web0-adapter "env ZPR_ADAPTER_SERVICES=OciWeb /app/bin/ph adapter -c adapter-web0-conf.toml"
-  wait_for_adapter node0 172.30.0.14
+  wait_for_adapter node0 "$ZPR_NETWORK_PREFIX.14" web0-adapter
 else
   echo "[web0] OciWeb smoke adapter skipped for single-node organization $ORGANIZATION_ID"
 fi
 if [[ "${START_PREMWEB_ADAPTER:-0}" == "1" ]]; then
   launch web1 web1-adapter "env ZPR_ADAPTER_SERVICES=PremWeb /app/bin/ph adapter -c adapter-web1-conf.toml"
-  wait_for_adapter node1 172.30.0.12
+  wait_for_adapter node1 "$ZPR_NETWORK_PREFIX.12" web1-adapter
 else
   echo "[web1] PremWeb ZPR adapter skipped (set START_PREMWEB_ADAPTER=1 to enable)"
 fi
@@ -787,7 +823,7 @@ if [ "$gateway_enabled" = yes ]; then
   gateway_substrate=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$gateway_container")
   case "$gateway_substrate" in ''|*[!0-9.]*) echo "internet gateway has no valid IPv4 substrate address" >&2; exit 1 ;; esac
   [ -n "$gateway_substrate" ] || { echo "internet gateway container has no substrate address" >&2; exit 1; }
-  wait_for_adapter node0 "$gateway_substrate"
+  wait_for_adapter node0 "$gateway_substrate" internet-gateway-adapter
   gateway_address=
   for _ in $(seq 30); do
     if gateway_address=$(docker exec "$gateway_container" ip -6 -o addr show dev tun10 scope global | awk '$4 ~ /^fd5a:5052:adda:1:/ { split($4, address, "/"); print address[1]; exit }') &&

@@ -1,8 +1,18 @@
 ZPR_ROOT ?=
 
-.PHONY: all linux-amd64 ph visaservice compiler dashboard check-zpr-root clean
+.PHONY: all linux-amd64 linux-arm64 ph visaservice compiler dashboard check-zpr-root clean
 
 all: ph visaservice compiler dashboard
+
+linux-arm64: check-zpr-root
+	docker build --platform linux/arm64 -t zpr-multinode-arm64-builder \
+		-f Dockerfile.build-linux .
+	docker run --rm --platform linux/arm64 -e ZPR_ROOT=/work \
+		-v "$(abspath $(ZPR_ROOT)):/work" zpr-multinode-arm64-builder \
+		/bin/bash /work/zpr-demo/multinode-demo/build-linux-arm64.sh
+	cd "$(ZPR_ROOT)/zpr-visaservice/zpr-dashboard" && \
+		GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath \
+		-ldflags '-s -w' -o "$(CURDIR)/bin/linux-arm64/zpr-web-dashboard" ./cmd/zpr-web-dashboard
 
 linux-amd64: check-zpr-root
 	docker build --platform linux/amd64 -t zpr-multinode-builder \

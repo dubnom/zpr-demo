@@ -10,6 +10,11 @@
 
 ## Handy commands (`commands/`)
 
+Organization provisioning defines `SimulatorControlService` by authenticated
+`simulator-control` adapter identity only. Do not constrain this provider to the
+adapter's requested fixed address: Visa may assign a dynamic address, and that
+constraint denies machine-controller traffic even when every node is synchronized.
+
 Once both environments are deployed, `commands/` wraps the long-form incantations
 documented further down — one name per ZPR process, one way to reach each. The long
 forms are kept below on purpose: they're the reference when a command misbehaves.
@@ -105,6 +110,12 @@ organization's `state/redis` bind mount with durable AOF writes. Before replacin
 an older, non-persistent Visa container, the launcher exports its database; an
 unrecoverable stopped database fails deployment instead of silently restoring
 the demo policy. Reconnects use the Packet Handler's fresh-session recovery.
+Explicitly approved Visa-only initialization can recover a missing database
+using the organization's `fresh-visa-state-approved` marker before activation.
+This retains credentials, directory data and editor drafts, but cannot recover
+runtime-only policies from the missing database. The marker authorizes
+`ZPR_RESTORE_BASE=1` for Visa only and is consumed after the composed policy is
+installed. Without explicit approval, the missing-database guard remains active.
 
 First activation installs the composed policy using the deployed keys.
 Subsequent activations/redeploys load the persisted policy without `--clear-state`
@@ -112,6 +123,21 @@ or an initial-policy override. **Restore base** is the explicit destructive
 operation; activation backs up the Visa database alongside policy/directory
 state before resetting. Partial or mismatched node identities and incomplete
 API credentials fail preflight rather than triggering key rotation.
+
+Changing an organization's compiled policy does not silently replace the active
+policy in its persisted Visa database. Review the change, then explicitly install
+the compiled artifact through the Visa admin API (`vs-admin policies --path`);
+this updates the active policy while retaining the Redis database and identities.
+
+Each organization Compose network uses the `/24` containing the substrate
+addresses in its organization profile. All nodes in one profile must share that
+subnet, and concurrently running organizations must use non-overlapping ranges.
+The legacy `multinode-demo` keeps `172.30.0.0/24`; Great Lakes uses
+`172.31.0.0/24` so it can run alongside Load Lab without changing Load Lab's
+network or persisted state. Their loopback-published Visa admin APIs also use
+separate host ports: `8185` for the legacy/Load Lab deployment and `8186` for
+other organization deployments by default. Set `ZPR_VS_ADMIN_PORT` to override
+an organization's port when needed.
 
 Organization redeploy also rebuilds the Simulator DNS binding against the
 current node0 container and checks service records. Stop removes that binding
@@ -342,6 +368,40 @@ deploy script waits for both `node0` and `node1` to report the peer substrate
 endpoint as `(Active)` before starting the endpoint adapters. It is safe to rerun;
 configs and policy are regenerated and the managed demo processes restart.
 
+**Native Apple Silicon infrastructure (no x86 emulation):**
+
+```bash
+make ZPR_ROOT=../.. linux-arm64
+docker build --platform linux/arm64 \
+  --build-arg RUNTIME_BASE=debian:trixie-slim \
+  --build-arg BIN_DIR=bin/linux-arm64 -t zpr-multinode:arm64 .
+export ZPR_MULTINODE_PLATFORM=linux/arm64
+export ZPR_MULTINODE_IMAGE=zpr-multinode:arm64
+export ZPR_MULTINODE_DIRECTORY_IMAGE=zpr-multinode-directory:arm64
+export ZPR_MULTINODE_DIRECTORY_MANAGER_IMAGE=zpr-multinode-directory-manager:arm64
+./local-compute/deploy-docker.sh
+```
+
+The native builder and runtime both use Debian trixie so the Rust executables,
+OpenSSL and system libraries have matching ABIs. ARM64 artifacts have a separate
+`bin/linux-arm64` directory; existing amd64 binaries and image tags are retained.
+The runtime retains Ubuntu 24.04's Redis 7 package rather than upgrading the
+persistent Visa store to Debian trixie's Redis 8 as a side effect.
+Nodes, Visa, endpoint adapters, web gateway, directory and directory manager use
+the configured platform. The trusted-service helper and machine-control proxy
+also match that architecture. Image/platform mismatches fail before deployment
+or activation stops the previous runtime.
+
+For dashboard-managed activation, pass these variables into the **Simulator
+container environment**, not just the host shell. They must remain configured
+for subsequent switches and rollback. An explicitly configured
+`ZPR_TRUSTED_SERVICE_BINARY` must likewise point to an ARM64 executable.
+Simulator startup can also load these named settings from the operator's
+`.local-runtime/dashboard-stack/multinode-platform.json` JSON object, so a
+complete container removal/recreation does not discard the architecture choice.
+Without these overrides the existing amd64 deployment remains the default.
+This does not require changing Control Room or restarting Docker Desktop.
+
 **Watch the ZPR processes** (logs tee'd to a host-mounted volume — no `docker
 exec` needed):
 
@@ -373,7 +433,7 @@ managed runtime before starting the selected organization's Compose project.
 The organization profile's LDIF seeds a private LDAPS sidecar and the existing
 mTLS trusted-service provider. Directory data, passwords, and TLS keys live
 under `.local-runtime/multinode/<organization-id>/directory`; the shared
-Linux/amd64 provider binary lives under `.local-runtime/dashboard-stack/`.
+architecture-matched provider binary lives under `.local-runtime/dashboard-stack/`.
 The directory service is attached only to that organization's private Compose
 network and publishes no host port. The generic `multinode-demo` deployment
 does not enable the directory sidecar.

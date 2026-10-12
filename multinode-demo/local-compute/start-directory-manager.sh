@@ -4,6 +4,9 @@ script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 multi_dir=$(CDPATH='' cd -- "$script_dir/.." && pwd)
 docs_root=$(CDPATH='' cd -- "$multi_dir/../.." && pwd)
 dashboard_dir=${ZPR_DASHBOARD_DIR:-$docs_root/zpr-visaservice/zpr-dashboard}
+. "$dashboard_dir/scripts/multinode-platform.sh"
+configure_multinode_platform
+verify_multinode_platform
 : "${ZPR_RUNTIME_ROOT:?organization runtime root required}"
 : "${ZPR_CONTAINER_PREFIX:?organization container prefix required}"
 : "${ZPR_NETWORK_NAME:?organization network required}"
@@ -25,8 +28,9 @@ directory_sources=$(awk '
 ZPR_DIRECTORY_BASE_DN=$(docker inspect "${ZPR_CONTAINER_PREFIX}directory" \
     --format '{{json .Config.Env}}' | jq -er '.[] | select(startswith("ZPR_DIRECTORY_BASE_DN=")) | ltrimstr("ZPR_DIRECTORY_BASE_DN=") | select(length > 0)')
 export ZPR_DIRECTORY_BASE_DN
-export ZPR_TRUSTED_SERVICE_BINARY=${ZPR_TRUSTED_SERVICE_BINARY:-$docs_root/.local-runtime/dashboard-stack/zpr-trusted-service-linux-amd64}
-docker build --platform linux/amd64 -t zpr-multinode-directory-manager \
+export ZPR_TRUSTED_SERVICE_BINARY=${ZPR_TRUSTED_SERVICE_BINARY:-$docs_root/.local-runtime/dashboard-stack/zpr-trusted-service-linux-$ZPR_MULTINODE_ARCH}
+docker build --platform "$ZPR_MULTINODE_PLATFORM" --build-arg "ZPR_MULTINODE_IMAGE=$ZPR_MULTINODE_IMAGE" \
+    -t "$ZPR_MULTINODE_DIRECTORY_MANAGER_IMAGE" \
     -f "$multi_dir/Dockerfile.directory-manager" "$multi_dir"
 docker compose --project-name "zpr-${ZPR_CONTAINER_PREFIX%-}" \
     -f "$multi_dir/docker-compose.yml" --profile directory-manager \

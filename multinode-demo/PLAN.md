@@ -154,9 +154,11 @@ re-deploy re-renders and restarts without rebuilding the image. This reuses the
   updated later.
 
 * Inside the container network, the containers need to be able to talk to each
-  other over IP. Use a user-defined bridge network (e.g. `zpr-local`,
-  `172.30.0.0/24`) with **static IPs** for `node1`/`vs`/`web1` — the adapter
-  configs need `node1`'s address baked in (see §7), so it must be stable.
+  other over IP. Use a user-defined bridge network (e.g. `zpr-local`) with
+  **static IPs** for `node1`/`vs`/`web1` — the adapter configs need `node1`'s
+  address baked in (see §7), so it must be stable. The legacy `multinode-demo`
+  uses `172.30.0.0/24`; organization networks derive their `/24` from the
+  profile's substrate addresses and must not overlap other running networks.
 
 * Only the `node1` container needs to be reachable from the host OS: publish
   port `5000` for **both TCP and UDP** (`5000:5000/tcp` and `5000:5000/udp`).
@@ -309,7 +311,6 @@ The startup order for the ZPR processes is then:
 
 5. Start the `ph` (adapter) process in the `web1` container. (nginx is already
    up from the entrypoint — verify it's serving before starting the adapter.)
-
 
 
 

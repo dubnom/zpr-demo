@@ -62,6 +62,22 @@ ensure_node_identity() {
   chmod 600 "$include/node$index-private-key.pem" "$include/node$index-noise.key"
 }
 
+verify_vs_database_recovery() {
+  case "${ZPR_RESTORE_BASE:-0}" in
+    0|1) ;;
+    *) echo "invalid Visa restore mode; expected 0 or 1" >&2; return 1 ;;
+  esac
+  if [ -s "$CONF_ROOT/vs/vs_keys.toml" ] &&
+     [ ! -s "$RUNTIME_ROOT/state/redis/dump.rdb" ] &&
+     [ ! -s "$RUNTIME_ROOT/state/redis/appendonlydir/appendonly.aof.manifest" ]; then
+    if [ "${ZPR_RESTORE_BASE:-0}" != 1 ]; then
+      echo "existing Visa runtime has no recoverable database; refusing policy reset" >&2
+      return 1
+    fi
+    echo "Initializing missing Visa database with explicit approval; runtime-only policy changes cannot be recovered" >&2
+  fi
+}
+
 visa_start_command() {
   local policy_exists=$1
   case "$policy_exists:${ZPR_RESTORE_BASE:-0}" in
@@ -141,9 +157,9 @@ ensure_api_credentials() {
     echo "incomplete Visa API credentials; refusing automatic credential rotation" >&2
     return 1
   fi
-  docker run --rm --platform linux/amd64 -v "$CONF_ROOT/vs:/conf" zpr-multinode \
+  docker run --rm --platform "$ZPR_MULTINODE_PLATFORM" -v "$CONF_ROOT/vs:/conf" "$ZPR_MULTINODE_IMAGE" \
     /app/bin/vsapikey create --init readwrite client /conf/vs_keys.toml > "$BOB_DIR/client.key"
-  docker run --rm --platform linux/amd64 -v "$CONF_ROOT/vs:/conf" zpr-multinode \
+  docker run --rm --platform "$ZPR_MULTINODE_PLATFORM" -v "$CONF_ROOT/vs:/conf" "$ZPR_MULTINODE_IMAGE" \
     /app/bin/vsapikey create read web-monitor /conf/vs_keys.toml > "$BOB_DIR/web-monitor.key"
   chmod 600 "$CONF_ROOT/vs/vs_keys.toml" "$BOB_DIR/client.key" "$BOB_DIR/web-monitor.key"
 }

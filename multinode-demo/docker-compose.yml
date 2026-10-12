@@ -4,8 +4,8 @@
 services:
   node1:
     profiles: ["legacy"]
-    image: zpr-multinode
-    platform: linux/amd64
+    image: ${ZPR_MULTINODE_IMAGE:-zpr-multinode}
+    platform: ${ZPR_MULTINODE_PLATFORM:-linux/amd64}
     container_name: ${ZPR_CONTAINER_PREFIX:-}node1
     command: ["/bin/sh", "/entrypoint.sh"]
     cap_add: [NET_ADMIN]
@@ -17,11 +17,11 @@ services:
       - ${ZPR_RUNTIME_ROOT:-./local-compute}/logs:/logs
     networks:
       zpr-local:
-        ipv4_address: 172.30.0.10
+        ipv4_address: "${ZPR_NETWORK_PREFIX:-172.30.0}.10"
 
   alice:
-    image: zpr-multinode
-    platform: linux/amd64
+    image: ${ZPR_MULTINODE_IMAGE:-zpr-multinode}
+    platform: ${ZPR_MULTINODE_PLATFORM:-linux/amd64}
     container_name: ${ZPR_CONTAINER_PREFIX:-}alice
     command: ["/bin/sh", "/entrypoint.sh"]
     cap_add: [NET_ADMIN]
@@ -33,11 +33,11 @@ services:
       - ${ZPR_RUNTIME_ROOT:-./local-compute}/logs:/logs
     networks:
       zpr-local:
-        ipv4_address: 172.30.0.15
+        ipv4_address: "${ZPR_NETWORK_PREFIX:-172.30.0}.15"
   node0:
     profiles: ["legacy"]
-    image: zpr-multinode
-    platform: linux/amd64
+    image: ${ZPR_MULTINODE_IMAGE:-zpr-multinode}
+    platform: ${ZPR_MULTINODE_PLATFORM:-linux/amd64}
     container_name: ${ZPR_CONTAINER_PREFIX:-}node0
     command: ["/bin/sh", "/entrypoint.sh"]
     cap_add: [NET_ADMIN]
@@ -49,11 +49,11 @@ services:
       - ${ZPR_RUNTIME_ROOT:-./local-compute}/logs:/logs
     networks:
       zpr-local:
-        ipv4_address: 172.30.0.13
+        ipv4_address: "${ZPR_NETWORK_PREFIX:-172.30.0}.13"
 
   vs:
-    image: zpr-multinode
-    platform: linux/amd64
+    image: ${ZPR_MULTINODE_IMAGE:-zpr-multinode}
+    platform: ${ZPR_MULTINODE_PLATFORM:-linux/amd64}
     container_name: ${ZPR_CONTAINER_PREFIX:-}vs
     command: ["/bin/sh", "/entrypoint.sh"]
     cap_add: [NET_ADMIN]
@@ -65,14 +65,14 @@ services:
       - ${ZPR_RUNTIME_ROOT:-./local-compute}/state/redis:/state
       - ${ZPR_RUNTIME_ROOT:-./local-compute}/logs:/logs
     ports:
-      - "127.0.0.1:8185:8183/tcp"
+      - "127.0.0.1:${ZPR_VS_ADMIN_PORT:-8185}:8183/tcp"
     networks:
       zpr-local:
-        ipv4_address: 172.30.0.11
+        ipv4_address: "${ZPR_NETWORK_PREFIX:-172.30.0}.11"
 
   directory:
-    image: zpr-multinode-directory
-    platform: linux/amd64
+    image: ${ZPR_MULTINODE_DIRECTORY_IMAGE:-zpr-multinode-directory}
+    platform: ${ZPR_MULTINODE_PLATFORM:-linux/amd64}
     profiles: ["organization"]
     container_name: ${ZPR_CONTAINER_PREFIX:-}directory
     volumes:
@@ -84,11 +84,11 @@ services:
       ZPR_DIRECTORY_ATTRIBUTES: ${ZPR_DIRECTORY_ATTRIBUTES:-}
     networks:
       zpr-local:
-        ipv4_address: 172.30.0.16
+        ipv4_address: "${ZPR_NETWORK_PREFIX:-172.30.0}.16"
 
   directory-manager:
-    image: zpr-multinode-directory-manager
-    platform: linux/amd64
+    image: ${ZPR_MULTINODE_DIRECTORY_MANAGER_IMAGE:-zpr-multinode-directory-manager}
+    platform: ${ZPR_MULTINODE_PLATFORM:-linux/amd64}
     profiles: ["directory-manager"]
     container_name: ${ZPR_CONTAINER_PREFIX:-}directory-manager
     environment:
@@ -101,8 +101,8 @@ services:
       zpr-local: {}
 
   web1:
-    image: zpr-multinode
-    platform: linux/amd64
+    image: ${ZPR_MULTINODE_IMAGE:-zpr-multinode}
+    platform: ${ZPR_MULTINODE_PLATFORM:-linux/amd64}
     container_name: ${ZPR_CONTAINER_PREFIX:-}web1
     command: ["/bin/sh", "/entrypoint.sh"]
     cap_add: [NET_ADMIN]
@@ -119,11 +119,11 @@ services:
       - ./tools:/tools:ro
     networks:
       zpr-local:
-        ipv4_address: 172.30.0.12
+        ipv4_address: "${ZPR_NETWORK_PREFIX:-172.30.0}.12"
 
   web0:
-    image: zpr-multinode
-    platform: linux/amd64
+    image: ${ZPR_MULTINODE_IMAGE:-zpr-multinode}
+    platform: ${ZPR_MULTINODE_PLATFORM:-linux/amd64}
     container_name: ${ZPR_CONTAINER_PREFIX:-}web0
     command: ["/bin/sh", "/entrypoint.sh"]
     cap_add: [NET_ADMIN]
@@ -136,12 +136,12 @@ services:
       - ./tools:/tools:ro
     networks:
       zpr-local:
-        ipv4_address: 172.30.0.14
+        ipv4_address: "${ZPR_NETWORK_PREFIX:-172.30.0}.14"
 
   internet-gateway:
     profiles: ["web-gateway"]
-    image: zpr-multinode
-    platform: linux/amd64
+    image: ${ZPR_MULTINODE_IMAGE:-zpr-multinode}
+    platform: ${ZPR_MULTINODE_PLATFORM:-linux/amd64}
     container_name: ${ZPR_CONTAINER_PREFIX:-}internet-gateway
     command: ["/bin/sh", "/entrypoint.sh"]
     cap_add: [NET_ADMIN]
@@ -162,4 +162,4 @@ networks:
     name: ${ZPR_NETWORK_NAME:-zpr-local}
     ipam:
       config:
-        - subnet: 172.30.0.0/24
+      - subnet: "${ZPR_NETWORK_SUBNET:-172.30.0.0/24}"
