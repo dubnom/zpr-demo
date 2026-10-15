@@ -55,6 +55,7 @@ ZPR_PKI_BIN="$ZPR_DOCS_ROOT/zpr-core/integration-test/lib/zpr-pki"
 ORGANIZATION_PROFILE="$DASHBOARD_DIR/cmd/zpr-web-dashboard/examples/organizations/$ORGANIZATION_ID.json"
 DIRECTORY_ROOT="$RUNTIME_ROOT/directory"
 . "$DASHBOARD_DIR/scripts/multinode-platform.sh"
+. "$DASHBOARD_DIR/scripts/business-workloads.sh"
 configure_multinode_platform
 TRUSTED_SERVICE_BINARY="${ZPR_TRUSTED_SERVICE_BINARY:-$ZPR_DOCS_ROOT/.local-runtime/dashboard-stack/zpr-trusted-service-linux-$ZPR_MULTINODE_ARCH}"
 export ZPR_TRUSTED_SERVICE_BINARY="$TRUSTED_SERVICE_BINARY"
@@ -374,6 +375,12 @@ prepare_organization_nodes() {
   organization_include="$RUNTIME_ROOT/include"
   mkdir -p "$organization_include"
   copy_initial_include
+  if [ "$(jq -r '.business_simulation // false' "$ORGANIZATION_PROFILE")" = true ]; then
+    prepare_business_keys "$RUNTIME_ROOT/business-keys"
+    for business_name in $(business_workload_names); do
+      cp "$RUNTIME_ROOT/business-keys/$business_name.pub.pem" "$organization_include/$business_name.pub.pem"
+    done
+  fi
 
   for key_file in client-finance-rsa-pubkey.pem client-operations-rsa-pubkey.pem client-telemetry-rsa-pubkey.pem service-echo-rsa-pubkey.pem service-metrics-rsa-pubkey.pem internet-gateway-rsa-pubkey.pem; do
     cp "$pregen/$key_file" "$organization_include/$key_file"
@@ -517,6 +524,11 @@ EOF
   for number in $(seq -w 1 20); do
     printf '"machine-%s" = "/runtime-include/machine-%s.pub.pem"\n' "$number" "$number" >> "$ADMIN_RUNTIME/multinode-demo.zplc"
   done
+  if [ "$(jq -r '.business_simulation // false' "$ORGANIZATION_PROFILE")" = true ]; then
+    for business_name in $(business_workload_names); do
+      printf '"%s" = "/runtime-include/%s.pub.pem"\n' "$business_name" "$business_name" >> "$ADMIN_RUNTIME/multinode-demo.zplc"
+    done
+  fi
   cat >> "$ADMIN_RUNTIME/multinode-demo.zplc" <<'EOF'
 
 [protocols.http]

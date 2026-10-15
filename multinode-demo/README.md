@@ -15,6 +15,15 @@ Organization provisioning defines `SimulatorControlService` by authenticated
 adapter's requested fixed address: Visa may assign a dynamic address, and that
 constraint denies machine-controller traffic even when every node is synchronized.
 
+Profiles with `business_simulation: true` provision seven persistent business
+provider identities using the dashboard's `scripts/business-workloads.sh`.
+Private keys stay under the organization runtime's `business-keys/`; only public
+keys enter runtime includes and the compiler bootstrap registry. Repeated
+preparation preserves existing keys. This is Simulator provisioning, not a
+production operator dependency. See the dashboard's Great Lakes organization
+guide for the separate provider host, service workflows, and access matrices.
+Source changes alone do not deploy or start these providers.
+
 Once both environments are deployed, `commands/` wraps the long-form incantations
 documented further down — one name per ZPR process, one way to reach each. The long
 forms are kept below on purpose: they're the reference when a command misbehaves.
