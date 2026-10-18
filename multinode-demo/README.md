@@ -85,6 +85,63 @@ produces ELF binaries usable by the Ubuntu containers and OCI hosts, including
 when building from Apple Silicon. The build includes `ph-cli`, which the remote
 deploy uses to verify the peer link.
 
+### Paired image-only demo archives (experimental)
+
+The packaging helper can export already-built Linux/amd64 ZPR and Simulator
+images into a version-matched pair. It does not build images, include the
+runtime configuration or startup scripts, or create an installable demo.
+Treat its output as unqualified engineering artifacts; do not use it on a
+shared or production host.
+
+From this directory, with Docker available and both image tags already loaded:
+
+```bash
+mkdir -p /tmp/zpr-demo-image-pair
+python3 packaging/package-demo-images.py build \
+  --release-id demo-candidate-20261018-safe-context \
+  --output-dir /tmp/zpr-demo-image-pair \
+  --zpr-image zpr-multinode:demo-candidate-20261018-safe-context \
+  --simulator-image zpr-simulator:demo-candidate-20261018
+python3 packaging/package-demo-images.py verify \
+  /tmp/zpr-demo-image-pair/zpr-demo-demo-candidate-20261018-safe-context.tar \
+  /tmp/zpr-demo-image-pair/simulator-demo-candidate-20261018-safe-context.tar
+```
+
+The command creates a SHA-256 sidecar for each archive and refuses to overwrite
+existing same-release output files. Compare the sidecars against checksums from
+a separately trusted channel; they are not signatures. `install` verifies the
+pair before loading either image into Docker, but does not start containers:
+
+```bash
+python3 packaging/package-demo-images.py install \
+  /path/to/zpr-demo-demo-candidate-20261018-safe-context.tar \
+  /path/to/simulator-demo-candidate-20261018-safe-context.tar
+```
+
+These example tags identify local candidates, not reproducible releases. The
+current ZPR candidate contains pre-existing binaries without a verified source
+revision, and the Simulator candidate still requires source-tree bind mounts
+at runtime. Runtime-support bundling, target-host setup, lifecycle commands,
+and clean Ubuntu acceptance remain incomplete.
+
+Before using the designated disposable Ubuntu 26.04.1 LTS x86-64 host, install
+Docker Engine and Compose v2, then run this read-only host check from the package
+source checkout:
+
+```bash
+sh packaging/preflight-demo-host.sh
+```
+
+It verifies the Ubuntu 26.04 release, x86-64 host and Docker architectures,
+local Docker Engine, Compose v2 and accessible `/dev/net/tun`; it reports
+detected memory and free disk without imposing unapproved sizing thresholds.
+It does not alter host settings, verify that Docker containers can use TUN, or
+install/start the demo. Run the focused fixture test on a development host:
+
+```bash
+sh packaging/test-preflight-demo-host.sh
+```
+
 ### Organization runtime lifecycle (local Docker)
 
 Each organization deployment starts a separate phpLDAPadmin directory manager
