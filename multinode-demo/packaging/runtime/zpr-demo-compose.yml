@@ -1,0 +1,147 @@
+services:
+  node0:
+    image: ${ZPR_DEMO_IMAGE_REFERENCE:?validated by zpr-demo-runtime}
+    platform: linux/amd64
+    pull_policy: never
+    init: true
+    privileged: true
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    user: "${ZPR_DEMO_UID:?}:${ZPR_DEMO_GID:?}"
+    entrypoint: ["/bin/sh", "-c", "umask 077; exec /bin/sh /entrypoint.sh"]
+    command: []
+    tmpfs:
+      - /var/run/zpr:rw,noexec,nosuid,size=1m,uid=${ZPR_DEMO_UID},gid=${ZPR_DEMO_GID},mode=0700
+    volumes:
+      - ${ZPR_DEMO_PACKAGE_DIR:?}/runtime/assets/entrypoints/entrypoint-node0.sh:/entrypoint.sh:ro
+      - ${ZPR_DEMO_STATE_DIR:?}/conf/node0:/conf:ro
+      - ${ZPR_DEMO_STATE_DIR}/include:/conf/include:ro
+      - ${ZPR_DEMO_STATE_DIR}/logs:/logs
+    networks:
+      zpr-demo:
+        ipv4_address: 172.30.0.13
+
+  node1:
+    image: ${ZPR_DEMO_IMAGE_REFERENCE:?validated by zpr-demo-runtime}
+    platform: linux/amd64
+    pull_policy: never
+    init: true
+    privileged: true
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    user: "${ZPR_DEMO_UID:?}:${ZPR_DEMO_GID:?}"
+    entrypoint: ["/bin/sh", "-c", "umask 077; exec /bin/sh /entrypoint.sh"]
+    command: []
+    tmpfs:
+      - /var/run/zpr:rw,noexec,nosuid,size=1m,uid=${ZPR_DEMO_UID},gid=${ZPR_DEMO_GID},mode=0700
+    volumes:
+      - ${ZPR_DEMO_PACKAGE_DIR:?}/runtime/assets/entrypoints/entrypoint-node1.sh:/entrypoint.sh:ro
+      - ${ZPR_DEMO_STATE_DIR:?}/conf/node1:/conf:ro
+      - ${ZPR_DEMO_STATE_DIR}/include:/conf/include:ro
+      - ${ZPR_DEMO_STATE_DIR}/logs:/logs
+    ports:
+      - "127.0.0.1:5000:5000/tcp"
+    networks:
+      zpr-demo:
+        ipv4_address: 172.30.0.10
+
+  vs:
+    image: ${ZPR_DEMO_IMAGE_REFERENCE:?validated by zpr-demo-runtime}
+    platform: linux/amd64
+    pull_policy: never
+    init: true
+    privileged: true
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    user: "${ZPR_DEMO_UID:?}:${ZPR_DEMO_GID:?}"
+    entrypoint: ["/bin/sh", "-c", "umask 077; exec /bin/sh /entrypoint.sh"]
+    command: []
+    tmpfs:
+      - /var/run/zpr:rw,noexec,nosuid,size=1m,uid=${ZPR_DEMO_UID},gid=${ZPR_DEMO_GID},mode=0700
+    volumes:
+      - ${ZPR_DEMO_PACKAGE_DIR:?}/runtime/assets/entrypoints/entrypoint-vs.sh:/entrypoint.sh:ro
+      - ${ZPR_DEMO_STATE_DIR:?}/conf/vs:/conf:ro
+      - ${ZPR_DEMO_STATE_DIR}/include:/conf/include:ro
+      - ${ZPR_DEMO_STATE_DIR}/state/redis:/state
+      - ${ZPR_DEMO_STATE_DIR}/logs:/logs
+    ports:
+      - "127.0.0.1:8185:8183/tcp"
+    networks:
+      zpr-demo:
+        ipv4_address: 172.30.0.11
+
+  web0:
+    image: ${ZPR_DEMO_IMAGE_REFERENCE:?validated by zpr-demo-runtime}
+    platform: linux/amd64
+    pull_policy: never
+    init: true
+    privileged: true
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    user: "${ZPR_DEMO_UID:?}:${ZPR_DEMO_GID:?}"
+    entrypoint: ["/bin/sh", "-ec", "umask 077; exec /bin/sh /entrypoint.sh"]
+    command: []
+    tmpfs:
+      - /var/run/zpr:rw,noexec,nosuid,size=1m,uid=${ZPR_DEMO_UID},gid=${ZPR_DEMO_GID},mode=0700
+      - /var/www/html:rw,nosuid,size=16m,uid=${ZPR_DEMO_UID},gid=${ZPR_DEMO_GID},mode=0755
+    volumes:
+      - ${ZPR_DEMO_PACKAGE_DIR:?}/runtime/assets/entrypoints/entrypoint-web0.sh:/entrypoint.sh:ro
+      - ${ZPR_DEMO_PACKAGE_DIR}/runtime/assets/tools/regen-banner.sh:/tools/regen-banner.sh:ro
+      - ${ZPR_DEMO_STATE_DIR:?}/conf/web0:/conf:ro
+      - ${ZPR_DEMO_STATE_DIR}/include:/conf/include:ro
+      - ${ZPR_DEMO_STATE_DIR}/logs:/logs
+    networks:
+      zpr-demo:
+        ipv4_address: 172.30.0.14
+
+  web1:
+    image: ${ZPR_DEMO_IMAGE_REFERENCE:?validated by zpr-demo-runtime}
+    platform: linux/amd64
+    pull_policy: never
+    init: true
+    privileged: true
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    user: "${ZPR_DEMO_UID:?}:${ZPR_DEMO_GID:?}"
+    entrypoint: ["/bin/sh", "-ec", "umask 077; exec /bin/sh /entrypoint.sh"]
+    command: []
+    tmpfs:
+      - /var/run/zpr:rw,noexec,nosuid,size=1m,uid=${ZPR_DEMO_UID},gid=${ZPR_DEMO_GID},mode=0700
+      - /var/www/html:rw,nosuid,size=16m,uid=${ZPR_DEMO_UID},gid=${ZPR_DEMO_GID},mode=0755
+    volumes:
+      - ${ZPR_DEMO_PACKAGE_DIR:?}/runtime/assets/entrypoints/entrypoint-web1.sh:/entrypoint.sh:ro
+      - ${ZPR_DEMO_PACKAGE_DIR}/runtime/assets/tools/regen-banner.sh:/tools/regen-banner.sh:ro
+      - ${ZPR_DEMO_STATE_DIR:?}/conf/web1:/conf:ro
+      - ${ZPR_DEMO_STATE_DIR}/include:/conf/include:ro
+      - ${ZPR_DEMO_STATE_DIR}/logs:/logs
+    networks:
+      zpr-demo:
+        ipv4_address: 172.30.0.12
+
+  alice:
+    image: ${ZPR_DEMO_IMAGE_REFERENCE:?validated by zpr-demo-runtime}
+    platform: linux/amd64
+    pull_policy: never
+    init: true
+    privileged: true
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    user: "${ZPR_DEMO_UID:?}:${ZPR_DEMO_GID:?}"
+    entrypoint: ["/bin/sh", "-c", "umask 077; exec /bin/sh /entrypoint.sh"]
+    command: []
+    tmpfs:
+      - /var/run/zpr:rw,noexec,nosuid,size=1m,uid=${ZPR_DEMO_UID},gid=${ZPR_DEMO_GID},mode=0700
+    volumes:
+      - ${ZPR_DEMO_PACKAGE_DIR:?}/runtime/assets/entrypoints/entrypoint-alice.sh:/entrypoint.sh:ro
+      - ${ZPR_DEMO_STATE_DIR:?}/conf/alice:/conf:ro
+      - ${ZPR_DEMO_STATE_DIR}/include:/conf/include:ro
+      - ${ZPR_DEMO_STATE_DIR}/logs:/logs
+    networks:
+      zpr-demo:
+        ipv4_address: 172.30.0.15
+
+networks:
+  zpr-demo:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24

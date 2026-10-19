@@ -1,5 +1,7 @@
 #!/usr/bin/bash
 
+umask 022
+
 if [[ $# < 2 ]]
 then
 	echo "Usage: $0 <who> <outfile>" > /dev/stderr

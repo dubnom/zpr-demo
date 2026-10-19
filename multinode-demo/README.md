@@ -124,6 +124,65 @@ revision, and the Simulator candidate still requires source-tree bind mounts
 at runtime. Runtime-support bundling, target-host setup, lifecycle commands,
 and clean Ubuntu acceptance remain incomplete.
 
+#### Published image-import checkpoint
+
+The authenticated [zpr.net download portal](https://zpr.net/#downloads) publishes
+the matched outer archives under version `dev-2026-10-18.1`:
+
+| Download | Outer archive SHA-256 |
+| --- | --- |
+| `zpr-dev-2026-10-18.1-linux-x86_64.tar.gz` | `ef64a73263f5341d27aee0122c472957f57576b05e0dae53ffd5e60d9cdfecce` |
+| `simulator-dev-2026-10-18.1-linux-x86_64.tar.gz` | `40f2e07512cc7274ae6634fa92a79cc440fec58e59a45164baf1b22383ad59be` |
+
+These outer archives wrap the image-only pair above, its checksum sidecars,
+and README instructions. The ZPR download also includes
+`package-demo-images.py`, so verification and image import do not require a
+source checkout. These outer checksums differ from those of the inner `.tar`
+image packages; compare the correct layer.
+
+On October 18, 2026, the operator reported successful download, extraction,
+and loading of both images into Docker on the designated Ubuntu host.
+This is operator-reported image-import evidence, not a captured host preflight,
+container startup, TUN test, or workload/policy acceptance result. No runtime
+start command is provided by this release. Target-generated configuration,
+credentials, and a source-independent start/stop/status workflow remain the
+next milestone.
+
+#### Runtime-package development checkpoint
+
+The v2 packaging helper now adds package-owned runtime assets. Its `install`
+command requires `--install-dir` for v2 archives and installs the verified pair
+under `<install-dir>/<release-id>/{zpr-demo,simulator}`. This does not upgrade the
+published `dev-2026-10-18.1` image-only downloads in place.
+
+For a v2 candidate installed on the disposable Ubuntu host, the ZPR commands
+are:
+
+```bash
+sudo env ZPR_DEMO_PACKAGE_DIR=/opt/zpr-demo/RELEASE_ID/zpr-demo \
+  ZPR_DEMO_STATE_DIR=/var/lib/zpr-demo \
+  /opt/zpr-demo/RELEASE_ID/zpr-demo/runtime/zpr-demo-runtime.sh start
+```
+
+Replace `RELEASE_ID` and the install root with the actual installed paths.
+Use the same environment and root-owned state directory with `status`, `smoke`,
+or `stop` instead of `start`. Startup requires root for the demo containers'
+TUN and nginx setup; do not initialize state as an ordinary user and then switch
+owners. The initializer generates local credentials and compiles policy using
+the imported image by immutable ID. Stop preserves identity and Redis state.
+`smoke` checks Alice-to-web0 HTTP over ZPR; it is not Simulator scenario
+acceptance.
+
+The runtime lifecycle and archive regression tests use stubbed Docker calls.
+The real packaged PKI helper has separately generated a CA and an X25519
+certificate whose signature and public-key binding verified inside a
+network-disabled, unprivileged temporary container. Compose configuration
+validation passed without creating containers. None of these checks proves
+privileged service startup on Ubuntu. The Simulator runtime remains an
+unprovisioned UI bootstrap fixture, not the matching runnable scenario. Do not
+advertise the current v2 candidate as a working paired demo before host startup,
+workload, and scenario acceptance.
+
 Before using the designated disposable Ubuntu 26.04.1 LTS x86-64 host, install
 Docker Engine and Compose v2, then run this read-only host check from the package
 source checkout:
@@ -617,3 +676,129 @@ docker build -t zpr-multinode .        # picks up the new bin/
 ```
 
 **Teardown:** `docker compose down`.
+## Runtime startup recovery
+
+### Local operator UI bootstrap
+
+`packaging/runtime/start-operator-ui.sh` starts independent Control-Service and
+Control Room containers from the pinned installed ZPR image on a Linux host.
+Set `DOCKER_HOST` to the daemon holding the ZPR stack, `ZPR_OPERATOR_IMAGE` to
+its immutable image ID, `ZPR_VS_CONTAINER` to the running Visa container,
+`ZPR_VS_MONITOR_KEY_FILE` to the absolute installed `bob/web-monitor.key` path,
+and `ZPR_OPERATOR_STATE_DIR` to a new private absolute directory.
+
+The script generates a separate 30-day operator CA and server/client credentials
+on the target host. It copies only the existing read-only Visa monitor API key
+and public admin trust certificate; Visa identities and policy are unchanged.
+Control-Service uses mTLS on `127.0.0.1:8790`, and Control Room uses the existing
+local-only mode at `http://127.0.0.1:8787`. Containers use host networking so these
+listeners remain loopback-only, without Docker-socket or Simulator mounts.
+Credentials persist in the private state directory. The launcher accepts
+`start`, `stop`, and `status`, reuses matching labeled containers, and refuses to
+alter unrelated containers or rotate partial credentials. Start waits for a
+connected Visa snapshot before reporting readiness.
+
+On workbench, both services survived Docker restart, the UI returned a connected
+snapshot of five actors and the live two-node peer link with Simulator stopped,
+and Control-Service rejected a request without a client certificate.
+Alice-to-web0 HTTP remained healthy during the independence test.
+
+Policy-Service now runs separately with mTLS at `127.0.0.1:8789`, using a private
+SQLite repository under `policy-store` in the operator state directory. It
+supports draft creation and revision editing through Control Room. Target-host
+checks passed for revision persistence after operator stop/start and HTTP 409
+on stale edits, with Simulator stopped and active policy unchanged. The launcher
+manages all three operator services and upgrades only its verified managed
+Control-Service when adding the Policy-Service connection.
+
+Compiler validation uses the packaged `zplc` with a read-only configuration and
+public-key snapshot under `policy-compiler` in operator state. No private identity
+keys or live apply credentials are mounted. `test-operator-policy.sh` exercises
+valid and invalid source through Control Room without saving or applying it.
+Target-host checks returned HTTP 200 for valid source and HTTP 422 with line/column
+diagnostics for invalid source. Compiler warnings are preserved, including the
+current fixture's missing trusted-service certificate and admin policy warnings.
+Upgrading the verified managed Policy-Service preserves the draft database.
+
+This is not the full production operator deployment:
+live policy apply, enrollment, named-user login and telemetry are not configured, and the UI is not
+remotely exposed. Certificate renewal is operator-managed. To access it from
+another workstation, keep it loopback-only and use an SSH tunnel:
+
+```sh
+ssh -N -L 8787:127.0.0.1:8787 dubnom@workbench.local
+```
+
+Then open `http://127.0.0.1:8787` on that workstation. The published installer
+embeds this launcher through `operator-start`, `operator-status`, and
+`operator-stop`, with private root-owned state at `/var/lib/zpr-demo-state/operator`.
+The earlier user-owned workbench setup remains separate; the installer refuses
+to adopt its containers automatically. Future runtime package builds include
+the standalone launcher alongside the other runtime scripts.
+
+### Ubuntu target-host checks (2026-10-18)
+
+On the disposable Linux x86-64 workbench, actual Alice-to-web0 HTTP succeeded
+across both nodes. A full six-container stop/start retained the shared identity
+and compiled-policy fingerprints plus the stored `policy:current` value; HTTP
+recovered after relaunching the application sessions against persisted policy.
+This check used the Docker CLI directly, not the installer's root wrapper.
+The downloaded archive pair also passed checksum validation and a package-helper
+installation into a fresh, separate directory without starting a second stack.
+
+The separate Simulator package served its organization UI on loopback port 8788
+and survived stop/start. Alice-to-web0 HTTP still passed with Simulator stopped.
+The original fixture remains unprovisioned. The separate scenario add-on now
+verifies real allowed HTTP and explicit Visa policy denial without provisioning
+those fixture machines.
+Control Room initially refused startup without independent Control-Service
+configuration and mTLS credentials. The local read-only bootstrap above now
+passes live topology and independence checks. Persistent policy draft editing,
+compiler validation and stale-edit rejection are verified; live apply is not
+configured. Full fresh-host installer startup,
+host reboot recovery, and production qualification remain unverified.
+
+On 2026-10-19 UTC the root installer also passed a clean-state installation from
+the three downloaded archives on the existing workbench host, followed by a full
+network/operator/Simulator stop/start. Fresh identities, Redis, operator mTLS,
+draft database and Simulator state were generated; none of the old state was
+reused. A saved revision-2 draft persisted, stale edits returned HTTP 409, and
+identity/configuration fingerprints plus the active policy remained unchanged.
+Prior installation/state and stopped operator/Simulator containers were retained
+under timestamped `before-clean` names.
+
+`packaging/runtime/test-clean-installed-workflow.sh` repeats that destructive
+runtime acceptance on the designated workbench only, with explicit root and
+`--disposable-host` acknowledgment. It is not a general reset tool. The test ran
+inside a temporary root tooling container sharing the real Ubuntu host Docker,
+TUN, OS metadata and package/state paths; it does not qualify a clean OS or reboot.
+
+Clean-state testing caught a startup transition where bootstrap peer links
+initially worked but briefly dropped as Visa reconciled node configuration.
+The runtime now waits for both named nodes to be synchronized with no pending
+policy installs/revocations, both peer links to be Active and actual Alice HTTP
+to pass for six consecutive samples. Failure resets the sample sequence and
+exhaustion fails explicitly. This startup gate handles observed convergence;
+it is not a claim that the Packet Handler reconfiguration behavior was fixed.
+
+The runtime prepares private empty `conf/<service>/include` directories before
+mounting shared identities beneath read-only `/conf` mounts. Existing identities
+are preserved. A pending policy bootstrap can be retried automatically only when
+all six prior containers remain in Docker's `created` state and Redis contains
+only the matching pending marker. If any container may have run or Redis contains
+other state, startup stops for operator inspection instead of resetting policy.
+For the published `demo-runtime-20261018-1631` packages, download the updated
+`zpr-cli` from the website and retry `start --disposable-host`; its
+hash-pinned runtime update applies these fixes without reinstalling archives
+or replacing generated identities.
+The banner generator sets its own `022` umask for public web content; it must
+not inherit the private `077` identity/logging umask. The updated fail-fast
+web entrypoints cause Compose to recreate web0/web1 on the next start so
+the banner fix is loaded, without resetting Redis or identity state.
+Initializer reruns distinguish mutable Redis/log files from immutable identity
+files. Empty runtime files and service-created read permissions are accepted
+under private roots; owner, link, and write-access checks remain enforced.
+Identity/configuration files and policy markers still require mode `0600`.
+Smoke makes three bounded direct HTTP attempts, then prints IPv6 routes,
+addresses, node links, and runtime log tails on failure. This helps distinguish
+authorization, routing and forwarding faults without resetting policy.
