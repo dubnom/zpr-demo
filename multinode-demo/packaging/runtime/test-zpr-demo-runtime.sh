@@ -65,6 +65,8 @@ mkdir -p "$2/include" "$2/conf/node0" "$2/conf/node1" "$2/conf/vs" \
     "$2/conf/web0" "$2/conf/web1" "$2/conf/alice" "$2/bob" "$2/admin" \
     "$2/state/redis" "$2/logs"
 find "$2" -type d -exec chmod 700 {} \;
+printf 'mock-web-monitor-key\n' > "$2/bob/web-monitor.key"
+chmod 600 "$2/bob/web-monitor.key"
 printf 'mock complete identity state\n' > "$2/.zpr-demo-state-v1"
 chmod 600 "$2/.zpr-demo-state-v1"
 EOF
@@ -159,7 +161,17 @@ case "$action" in
                     *) exit 2 ;;
                 esac
                 ;;
-            tmux)
+                    sh)
+                        [ "$service" = vs ] && [ "$1" = -c ] &&
+                            case "$2" in *VS_API_KEY*vs-admin*) ;; *) exit 2 ;; esac
+                        [ "$3" = sh ] || exit 2
+                        node=$4
+                        case "$node" in node0.demo|node1.demo) ;; *) exit 2 ;; esac
+                        IFS= read -r monitor_key || [ -n "$monitor_key" ]
+                        [ "$monitor_key" = mock-web-monitor-key ] || exit 1
+                        printf '{"cn":"%s","node":true,"node_details":{"in_sync":true,"pending_install":0,"pending_revocation":0}}\n' "$node"
+                        ;;
+                    tmux)
                 case "$1" in
                     has-session)
                         [ "$2" = -t ] || exit 2

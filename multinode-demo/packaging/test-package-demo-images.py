@@ -4,10 +4,12 @@ import io
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import unittest
 
 
@@ -223,16 +225,103 @@ class PackageDemoImagesTest(unittest.TestCase):
             self.assertTrue(os.access(zpr_root / name, os.X_OK))
         self.assertFalse((zpr_root / "test-init-demo-identities.sh").exists())
         self.assertFalse((zpr_root / "test-zpr-demo-runtime.sh").exists())
+        compose_text = (zpr_root / "zpr-demo-compose.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('ZPR_DEMO_WEB0_HTTP_SUPERVISOR: "1"', compose_text)
+        web0_entrypoint = zpr_root / "assets/entrypoints/entrypoint-web0.sh"
+        self.assertTrue(web0_entrypoint.is_file())
+        self.assertEqual(
+            subprocess.run(
+                ["sh", "-n", str(web0_entrypoint)],
+                text=True,
+                capture_output=True,
+            ).returncode,
+            0,
+        )
+        web0_entrypoint_text = web0_entrypoint.read_text(encoding="utf-8")
+        self.assertIn("nginx -g 'daemon off;' &", web0_entrypoint_text)
+        self.assertIn('wait "$nginx_pid" || true', web0_entrypoint_text)
+        self.assertIn("while :; do", web0_entrypoint_text)
 
         simulator_root = install_dir / "test-release/simulator/runtime"
         paired_runtime = simulator_root / "paired-demo-runtime.sh"
+        simulator_runtime = simulator_root / "simulator-demo-runtime.sh"
         self.assertTrue(paired_runtime.is_file())
         self.assertTrue(os.access(paired_runtime, os.X_OK))
+        self.assertTrue(simulator_runtime.is_file())
+        self.assertTrue(os.access(simulator_runtime, os.X_OK))
         self.assertFalse((simulator_root / "test-paired-demo-runtime.sh").exists())
+        simulator_text = simulator_runtime.read_text(encoding="utf-8")
+        for variable in (
+            "SIMULATION_DEMO_PROJECT",
+            "SIMULATION_DEMO_IMAGE",
+            "SIMULATION_DEMO_RELEASE_ID",
+        ):
+            self.assertIn(variable, simulator_text)
         profile = (simulator_root / "organizations/demo.json").read_text(
             encoding="utf-8"
         )
         self.assertIn("Unprovisioned UI-only profile", profile)
+
+    def test_web0_entrypoint_survives_http_service_stop(self):
+        demo_root = SCRIPT.parents[1]
+        entrypoint = demo_root / "local-compute/entrypoint-web0.sh"
+        test_root = self.root / "web0-entrypoint"
+        bin_dir = test_root / "bin"
+        bin_dir.mkdir(parents=True)
+        nginx_pid_file = test_root / "nginx.pid"
+        web0_runtime = test_root / "run-web0.sh"
+        source = entrypoint.read_text(encoding="utf-8")
+        self.assertIn("/tools/regen-banner.sh", source)
+        self.assertIn("/var/run/zpr", source)
+        web0_runtime.write_text(
+            source.replace("/tools/regen-banner.sh", "true").replace(
+                "/var/run/zpr", str(test_root / "run/zpr")
+            ),
+            encoding="utf-8",
+        )
+
+        (bin_dir / "ip").write_text("#!/bin/sh\nexit 0\n", encoding="ascii")
+        nginx = bin_dir / "nginx"
+        nginx.write_text(
+            """#!/bin/sh
+if [ "$1" = "-g" ]; then
+    printf '%s\\n' "$$" >"$NGINX_PID_FILE"
+    exec sleep 30
+fi
+if [ "$1" = "-s" ] && [ "$2" = "stop" ]; then
+    kill -TERM "$(cat "$NGINX_PID_FILE")"
+    exit 0
+fi
+exit 2
+""",
+            encoding="ascii",
+        )
+        for executable in (bin_dir / "ip", nginx):
+            executable.chmod(0o755)
+
+        env = self.env.copy()
+        env["PATH"] = str(bin_dir) + os.pathsep + env["PATH"]
+        env["NGINX_PID_FILE"] = str(nginx_pid_file)
+        process = subprocess.Popen(["sh", str(web0_runtime)], env=env)
+        try:
+            deadline = time.monotonic() + 5
+            while not nginx_pid_file.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(nginx_pid_file.is_file(), "web0 did not start nginx")
+            subprocess.run([str(nginx), "-s", "stop"], env=env, check=True)
+            time.sleep(0.2)
+            self.assertIsNone(
+                process.poll(),
+                "stopping nginx also stopped the web0 adapter container",
+            )
+            process.send_signal(signal.SIGTERM)
+            self.assertEqual(process.wait(timeout=5), 0)
+        finally:
+            if process.poll() is None:
+                process.send_signal(signal.SIGTERM)
+                process.wait(timeout=5)
 
     def test_build_verify_and_install_exact_pair(self):
         zpr, simulator = self.build()

@@ -74,6 +74,8 @@ services:
     image: ${ZPR_DEMO_IMAGE_REFERENCE:?validated by zpr-demo-runtime}
     platform: linux/amd64
     pull_policy: never
+    environment:
+      ZPR_DEMO_WEB0_HTTP_SUPERVISOR: "1"
     init: true
     privileged: true
     cap_add: [NET_ADMIN]
