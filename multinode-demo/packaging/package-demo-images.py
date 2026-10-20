@@ -154,11 +154,29 @@ def create_runtime_archive(source_dir, archive_path, extra_files=()):
             archive.add(path, arcname="runtime/" + relative, recursive=False)
 
 
-def verify_runtime_archive(runtime_path):
+def simulator_config_assets(runtime_dir):
+    source = Path(__file__).with_name("simulator-config.toml")
+    if source.is_symlink() or not source.is_file():
+        fail(f"required package-owned Simulator configuration is missing or unsafe: {source}")
+    expected = b"[ui]\nshow_static = true\n"
+    if source.read_bytes() != expected:
+        fail("package-owned Simulator configuration must contain only the static UI setting")
+    existing = Path(runtime_dir) / "config.toml"
+    if existing.is_symlink():
+        fail("Simulator runtime configuration must not be a symlink")
+    if existing.exists():
+        if not existing.is_file() or existing.read_bytes() != expected:
+            fail("Simulator runtime configuration differs from the package-owned static UI setting")
+        return []
+    return [(source, "config.toml")]
+
+
+def verify_runtime_archive(runtime_path, expected_package_id):
     try:
         with tarfile.open(runtime_path, "r:") as archive:
             members = archive.getmembers()
             seen = set()
+            files_by_name = {}
             files = 0
             for member in members:
                 safe_tar_member(member)
@@ -166,12 +184,32 @@ def verify_runtime_archive(runtime_path):
                 if member.name in seen:
                     fail(f"runtime archive repeats path {member.name!r}")
                 seen.add(member.name)
+                files_by_name[member.name] = member
                 if member.mode & 0o6022:
                     fail(f"runtime asset has unsafe permissions: {member.name!r}")
                 if member.isfile():
                     files += 1
             if files == 0:
                 fail("runtime archive contains no files")
+            if expected_package_id == "simulator-image":
+                config_name = "runtime/config.toml"
+                config_member = files_by_name.get(config_name)
+                if config_member is None or not config_member.isfile():
+                    fail(
+                        "Simulator runtime archive is missing required regular "
+                        "asset 'runtime/config.toml'"
+                    )
+                if config_member.size != len(b"[ui]\nshow_static = true\n"):
+                    fail(
+                        "Simulator runtime asset 'runtime/config.toml' must "
+                        "contain only the package-owned static UI setting"
+                    )
+                config_file = archive.extractfile(config_member)
+                if config_file is None or config_file.read() != b"[ui]\nshow_static = true\n":
+                    fail(
+                        "Simulator runtime asset 'runtime/config.toml' must "
+                        "contain only the package-owned static UI setting"
+                    )
     except tarfile.TarError as exc:
         raise ValueError(f"invalid runtime archive {runtime_path}: {exc}") from exc
 
@@ -347,7 +385,9 @@ def load_package(path, expected_package_id):
                     with runtime_tmp:
                         runtime_file.seek(0)
                         shutil.copyfileobj(runtime_file, runtime_tmp)
-                    verify_runtime_archive(Path(runtime_tmp.name))
+                    verify_runtime_archive(
+                        Path(runtime_tmp.name), expected_package_id
+                    )
                 finally:
                     Path(runtime_tmp.name).unlink(missing_ok=True)
             component = manifest.get("component")
@@ -490,6 +530,7 @@ def build(args):
         reject_local_runtime_source(source_path, docs_root)
     for source_path, _ in zpr_runtime_assets:
         reject_local_runtime_source(source_path, docs_root)
+    simulator_runtime_assets = simulator_config_assets(runtime_dirs[1])
 
     references = (args.zpr_image, args.simulator_image)
     docker_image_ids = tuple(inspect_image(reference) for reference in references)
@@ -511,7 +552,9 @@ def build(args):
             runtime_paths[0],
             extra_files=zpr_runtime_assets,
         )
-        create_runtime_archive(runtime_dirs[1], runtime_paths[1])
+        create_runtime_archive(
+            runtime_dirs[1], runtime_paths[1], extra_files=simulator_runtime_assets,
+        )
         for image_path, reference in zip(image_paths, references):
             run_docker("image", "save", "--output", str(image_path), reference)
         image_ids = tuple(

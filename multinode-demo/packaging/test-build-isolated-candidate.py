@@ -4,7 +4,9 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import shutil
 import subprocess
+import tarfile
 import tempfile
 import unittest
 from unittest import mock
@@ -20,15 +22,22 @@ REQUIRED_FILES = {
     "zpr-core": (
         "Cargo.toml", "adapter/ph/Cargo.toml", "adapter/cli/Cargo.toml",
         "integration-test/lib/zpr-pki",
+        *sorted(candidate.CAPNP_PRIVATE_SOURCE_PATHS),
     ),
     "zpr-common": ("Cargo.toml",),
     "zpr-utils": ("zpr-utils/Cargo.toml",),
-    "zpr-compiler": ("Cargo.toml",),
+    "zpr-compiler": ("Cargo.toml", *candidate.REQUIRED_BINARY_SOURCES["zpr-compiler"]),
     "zpr-dev-tools": ("docker/dev-env/Dockerfile",),
+    "zpr-dev-context": ("README.md",),
     "zpr-visaservice": (
         "Cargo.toml", "zpr-dashboard/go.mod", "zpr-dashboard/go.sum",
         "zpr-dashboard/scripts/Dockerfile.simulator",
         "zpr-dashboard/packaging/demo-runtime/runtime.sh",
+        *(f"zpr-dashboard/packaging/demo-runtime/{name}" for name in (
+            "paired-demo-runtime.sh", "simulator-demo-runtime.sh",
+            "simulation-environment.json", "organizations/demo.json",
+        )),
+        "vs/src/bin/vsapikey.rs",
     ),
     "zpr-demo": (
         "multinode-demo/Makefile",
@@ -37,6 +46,7 @@ REQUIRED_FILES = {
         "multinode-demo/build-linux-amd64.sh",
         "multinode-demo/Dockerfile",
         "multinode-demo/packaging/package-demo-images.py",
+        "multinode-demo/packaging/simulator-config.toml",
         "multinode-demo/packaging/runtime/runtime.sh",
         "multinode-demo/local-compute/entrypoint-alice.sh",
         "multinode-demo/local-compute/entrypoint-node0.sh",
@@ -85,12 +95,17 @@ def fixture_root(base):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(f"safe synthetic source {repository}/{relative}\n", encoding="utf-8")
         if repository == "zpr-demo":
+            (repo / "multinode-demo/packaging/simulator-config.toml").write_text(
+                "[ui]\nshow_static = true\n", encoding="ascii",
+            )
             (repo / "multinode-demo/Makefile").write_text(
                 'linux-amd64:\n'
                 '\tdocker build -t $(ZPR_BUILDER_IMAGE) .\n'
                 '\tdocker run -v "$(ZPR_ROOT):/work" $(ZPR_BUILDER_IMAGE)\n',
                 encoding="utf-8",
             )
+        if repository == "zpr-dev-context":
+            (repo / "README.md").write_text("synthetic dev context\n", encoding="utf-8")
         git(repo, "add", ".")
         git(repo, "commit", "-m", "synthetic baseline")
     return root
@@ -103,6 +118,7 @@ def make_args(source, output_parent, **overrides):
         "release_id": "test-candidate",
         "include_dirty": [],
         "include_untracked": [],
+        "revision": [],
         "dry_run": True,
     }
     values.update(overrides)
@@ -127,6 +143,79 @@ class IsolatedCandidateTests(unittest.TestCase):
         self.tool_paths = mock.patch.object(candidate.shutil, "which", side_effect=lambda name: f"/synthetic/{name}")
         self.tool_paths.start()
         self.addCleanup(self.tool_paths.stop)
+
+    def test_simulator_config_is_required_and_checked_before_staging(self):
+        repo = self.source / "zpr-demo"
+        relative = "multinode-demo/packaging/simulator-config.toml"
+        source = repo / relative
+        source.write_text('[ui]\nshow_static = false\n', encoding="ascii")
+        git(repo, "add", relative)
+        git(repo, "commit", "-m", "incorrect synthetic UI configuration")
+        with self.assertRaisesRegex(candidate.CandidateError, "only the static UI setting"):
+            candidate.collect_plan(make_args(self.source, self.output_parent))
+        source.unlink()
+        git(repo, "add", relative)
+        git(repo, "commit", "-m", "missing synthetic UI configuration")
+        with self.assertRaisesRegex(candidate.CandidateError, "required build input missing"):
+            candidate.collect_plan(make_args(self.source, self.output_parent))
+        self.assertEqual(list(self.output_parent.iterdir()), [])
+
+    def test_required_simulator_runtime_closure_fails_without_writes(self):
+        repo = self.source / "zpr-visaservice"
+        relative = "zpr-dashboard/packaging/demo-runtime/organizations/demo.json"
+        (repo / relative).unlink()
+        git(repo, "add", relative)
+        git(repo, "commit", "-m", "missing synthetic organization asset")
+        with self.assertRaisesRegex(candidate.CandidateError, "required Simulator runtime asset"):
+            candidate.collect_plan(make_args(self.source, self.output_parent))
+        self.assertEqual(list(self.output_parent.iterdir()), [])
+
+    def test_assembly_supplies_exact_simulator_config_and_rejects_other_inputs(self):
+        package_script = SCRIPT.with_name("package-demo-images.py")
+        module_spec = importlib.util.spec_from_file_location("candidate_package", package_script)
+        package = importlib.util.module_from_spec(module_spec)
+        module_spec.loader.exec_module(package)
+        runtime = self.base / "runtime"
+        runtime.mkdir()
+        for name in (
+            "paired-demo-runtime.sh", "simulator-demo-runtime.sh",
+            "simulation-environment.json", "organizations/demo.json",
+        ):
+            path = runtime / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("safe synthetic runtime asset\n", encoding="ascii")
+        archive = self.base / "runtime.tar"
+        package.create_runtime_archive(
+            runtime, archive, extra_files=package.simulator_config_assets(runtime),
+        )
+        with tarfile.open(archive) as contents:
+            self.assertEqual(
+                {member.name for member in contents},
+                {
+                    "runtime/config.toml", "runtime/paired-demo-runtime.sh",
+                    "runtime/simulator-demo-runtime.sh", "runtime/simulation-environment.json",
+                    "runtime/organizations/demo.json",
+                },
+            )
+            self.assertEqual(
+                contents.extractfile("runtime/config.toml").read(),
+                b"[ui]\nshow_static = true\n",
+            )
+        config = runtime / "config.toml"
+        config.write_text("[ui]\nshow_static = true\n", encoding="ascii")
+        self.assertEqual(package.simulator_config_assets(runtime), [])
+        config.write_text("[ui]\nshow_static = false\n", encoding="ascii")
+        with self.assertRaisesRegex(ValueError, "differs from the package-owned"):
+            package.simulator_config_assets(runtime)
+        isolated_script = self.base / "package-demo-images.py"
+        shutil.copyfile(package_script, isolated_script)
+        with mock.patch.object(package, "__file__", str(isolated_script)):
+            with self.assertRaisesRegex(ValueError, "required package-owned Simulator configuration"):
+                package.simulator_config_assets(runtime)
+        config.unlink()
+        config.symlink_to(SCRIPT.with_name("simulator-config.toml"))
+        with self.assertRaisesRegex(ValueError, "must not be a symlink"):
+            package.simulator_config_assets(runtime)
 
     def test_modified_tracked_files_require_exact_allowlist_and_record_diff(self):
         path = self.source / "zpr-demo/multinode-demo/README.md"
@@ -183,6 +272,69 @@ class IsolatedCandidateTests(unittest.TestCase):
             find_included(provenance, "zpr-demo", "multinode-demo/README.md")["sha256"],
             candidate.hashlib.sha256(staged.read_bytes()).hexdigest(),
         )
+
+    def immutable_revision_args(self):
+        revisions = [
+            f"{repository}={git_output(self.source / repository, 'rev-parse', 'HEAD')}"
+            for repository in candidate.REPOSITORIES
+        ]
+        return make_args(self.source, self.output_parent, revision=revisions)
+
+    def test_immutable_revision_snapshot_ignores_dirty_and_untracked_worktree(self):
+        args = self.immutable_revision_args()
+        repo = self.source / "zpr-demo"
+        pinned = git_output(repo, "rev-parse", "HEAD")
+        tracked = repo / "multinode-demo/README.md"
+        tracked.write_text("later worktree change\n", encoding="utf-8")
+        private = repo / "multinode-demo/packaging/private-test-input"
+        private.write_text("must not stage\n", encoding="utf-8")
+
+        plan, repos, inventories, root = candidate.collect_plan(args, run_id="pinned")
+        self.assertEqual(plan["source_mode"], "immutable-commits")
+        self.assertEqual(plan["repositories"]["zpr-demo"]["head"], pinned)
+        self.assertEqual(plan["repositories"]["zpr-demo"]["tracked_dirty"], [])
+        self.assertEqual(plan["repositories"]["zpr-demo"]["untracked"], [])
+        self.assertNotIn("private-test-input", json.dumps(plan))
+        source, _ = candidate.stage_only(plan, repos, inventories, root)
+        staged_readme = source / "zpr-demo/multinode-demo/README.md"
+        expected = candidate.run_git(
+            repo, "show", f"{pinned}:multinode-demo/README.md", binary=True
+        )
+        self.assertEqual(staged_readme.read_bytes(), expected)
+        self.assertFalse((source / "zpr-demo/multinode-demo/packaging/private-test-input").exists())
+        provenance = json.loads((root / "provenance.json").read_text())
+        self.assertEqual(provenance["source_mode"], "immutable-commits")
+        self.assertEqual(provenance["repositories"]["zpr-demo"]["head"], pinned)
+
+    def test_immutable_revision_mode_requires_complete_exact_pins_without_overlays(self):
+        args = self.immutable_revision_args()
+        args.revision.pop()
+        with self.assertRaisesRegex(candidate.CandidateError, "must pin every repository"):
+            candidate.collect_plan(args)
+        args = self.immutable_revision_args()
+        args.include_dirty = ["zpr-demo:multinode-demo/README.md"]
+        with self.assertRaisesRegex(candidate.CandidateError, "cannot use worktree allowlists"):
+            candidate.collect_plan(args)
+        args = self.immutable_revision_args()
+        args.revision[0] = args.revision[0].split("=")[0] + "=deadbeef"
+        with self.assertRaisesRegex(candidate.CandidateError, "full lowercase commit hash"):
+            candidate.collect_plan(args)
+        self.assertEqual(list(self.output_parent.iterdir()), [])
+
+    def test_staged_immutable_source_is_hash_verified_before_build(self):
+        plan, repos, inventories, root = candidate.collect_plan(
+            self.immutable_revision_args(), run_id="staged-check"
+        )
+        source, _ = candidate.stage_only(plan, repos, inventories, root)
+        provenance = json.loads((root / "provenance.json").read_text())
+        self.assertEqual(provenance["candidate_root"], str(root))
+        self.assertEqual(provenance["artifact_paths"], plan["artifact_paths"])
+        target = source / "zpr-demo/multinode-demo/README.md"
+        target.write_text("tampered after snapshot\n")
+        runner = mock.Mock()
+        with self.assertRaisesRegex(candidate.CandidateError, "staged source hash mismatch"):
+            candidate.build_staged(root, runner=runner)
+        runner.assert_not_called()
 
     def test_unapproved_and_private_untracked_files_are_excluded(self):
         repo = self.source / "zpr-demo"
@@ -623,6 +775,9 @@ class IsolatedCandidateTests(unittest.TestCase):
             elif command == ["go", "version"]:
                 self.assertEqual(kwargs["env"]["GOTOOLCHAIN"], "local")
                 output = "go version go1.27.1 synthetic/amd64\n"
+            elif command[:2] == ["docker", "run"]:
+                self.assertEqual(command[5], plan["docker_tags"]["builder"])
+                output = "rustc 1.98.1 synthetic\ncargo 1.98.1 synthetic\n"
             elif command[0] == "make":
                 directory = root / "source/zpr-demo/multinode-demo/bin"
                 directory.mkdir()
@@ -638,6 +793,11 @@ class IsolatedCandidateTests(unittest.TestCase):
         result = json.loads((root / "build-results.json").read_text())
         self.assertTrue(result["pair_verified"])
         self.assertFalse(result["byte_reproducible"])
+        self.assertEqual(result["rust_toolchain"], {
+            "rustc": "rustc 1.98.1 synthetic",
+            "cargo": "cargo 1.98.1 synthetic",
+        })
+        self.assertRegex(result["build_orchestrator"]["sha256"], r"^[0-9a-f]{64}$")
         self.assertEqual(result["images"]["zpr"]["id"], "sha256:" + "a" * 64)
         self.assertEqual(len(result["sha256"]), len(candidate.BINARIES) + 4)
         self.assertIn(plan["commands"][-1], calls)
@@ -653,9 +813,7 @@ class IsolatedCandidateTests(unittest.TestCase):
 
     def test_invalid_arguments_and_output_paths_do_not_write(self):
         with contextlib.redirect_stderr(io.StringIO()):
-            with self.assertRaises(SystemExit) as missing:
-                candidate.main([])
-        self.assertEqual(missing.exception.code, 2)
+            self.assertEqual(candidate.main([]), 1)
         for release in ("../escape", "invalid/tag", ""):
             with self.subTest(release=release):
                 with self.assertRaisesRegex(candidate.CandidateError, "release ID"):
@@ -679,6 +837,85 @@ class IsolatedCandidateTests(unittest.TestCase):
                         self.source, self.output_parent,
                         include_untracked=["zpr-demo:" + relative],
                     ))
+        self.assertEqual(list(self.output_parent.iterdir()), [])
+
+    def test_only_required_vendored_capnp_private_modules_are_included(self):
+        core = self.source / "zpr-core"
+        for relative in candidate.CAPNP_PRIVATE_SOURCE_PATHS:
+            with self.subTest(relative=relative):
+                self.assertEqual(candidate.exclusion_reason("zpr-core", relative), "")
+        self.assertEqual(
+            candidate.exclusion_reason("zpr-core", candidate.CAPNP_PRIVATE_TEST_PATH),
+            "vendored #[cfg(test)] module not used by production build",
+        )
+        source = core / "vendor/capnproto-rust/capnp/src/private/arena.rs"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text("pub fn arena() {}\n")
+        git(core, "add", "vendor/capnproto-rust/capnp/src/private/arena.rs")
+        git(core, "commit", "-m", "synthetic vendored source")
+        plan, _, _, _ = candidate.collect_plan(make_args(self.source, self.output_parent))
+        included = {
+            item["path"] for item in plan["repositories"]["zpr-core"]["included"]
+        }
+        self.assertIn("zpr-core/vendor/capnproto-rust/capnp/src/private/arena.rs", included)
+        (core / "vendor/capnproto-rust/capnp/src/private/arena.rs").write_text(
+            "-----BEGIN PRIVATE KEY-----\nnot-safe\n"
+        )
+        git(core, "add", "vendor/capnproto-rust/capnp/src/private/arena.rs")
+        git(core, "commit", "-m", "synthetic forbidden key source")
+        with self.assertRaisesRegex(candidate.CandidateError, "private-key material"):
+            candidate.collect_plan(make_args(self.source, self.output_parent))
+        self.assertEqual(list(self.output_parent.iterdir()), [])
+
+    def test_only_required_vsapikey_source_is_included_from_src_bin(self):
+        visa = self.source / "zpr-visaservice"
+        relative = candidate.VISA_APIKEY_BINARY_SOURCE
+        self.assertEqual(candidate.exclusion_reason("zpr-visaservice", relative), "")
+        self.assertEqual(
+            candidate.exclusion_reason("zpr-visaservice", "vs/src/bin/other.rs"),
+            "cache or build artifact",
+        )
+        plan, _, _, _ = candidate.collect_plan(make_args(self.source, self.output_parent))
+        path = f"zpr-visaservice/{relative}"
+        self.assertIn(path, {item["path"] for item in plan["repositories"]["zpr-visaservice"]["included"]})
+        source = visa / relative
+        source.write_text("fn main() {}\n")
+        git(visa, "add", relative)
+        git(visa, "commit", "-m", "synthetic apikey binary")
+        source.write_text("-----BEGIN PRIVATE KEY-----\nsynthetic\n")
+        git(visa, "add", relative)
+        git(visa, "commit", "-m", "synthetic forbidden apikey source")
+        with self.assertRaisesRegex(candidate.CandidateError, "private-key material"):
+            candidate.collect_plan(make_args(self.source, self.output_parent))
+        self.assertEqual(list(self.output_parent.iterdir()), [])
+
+    def test_only_required_compiler_binary_sources_are_included_and_scanned(self):
+        compiler = self.source / "zpr-compiler"
+        for relative in candidate.REQUIRED_BINARY_SOURCES["zpr-compiler"]:
+            with self.subTest(source=relative):
+                self.assertEqual(candidate.exclusion_reason("zpr-compiler", relative), "")
+                plan, _, _, _ = candidate.collect_plan(make_args(self.source, self.output_parent))
+                included = {item["path"] for item in plan["repositories"]["zpr-compiler"]["included"]}
+                self.assertIn(f"zpr-compiler/{relative}", included)
+                source = compiler / relative
+                original = source.read_bytes()
+                source.write_text("-----BEGIN PRIVATE KEY-----\nsynthetic\n")
+                git(compiler, "add", relative)
+                git(compiler, "commit", "-m", "synthetic forbidden compiler source")
+                with self.assertRaisesRegex(candidate.CandidateError, "private-key material"):
+                    candidate.collect_plan(make_args(self.source, self.output_parent))
+                source.write_bytes(original)
+                git(compiler, "add", relative)
+                git(compiler, "commit", "-m", "restore synthetic compiler source")
+        for relative in ("src/bin/zplfmt.rs", "src/bin/other.rs", "bin/zplc"):
+            self.assertEqual(
+                candidate.exclusion_reason("zpr-compiler", relative), "cache or build artifact",
+            )
+        (compiler / "src/bin/zplc.rs").unlink()
+        git(compiler, "add", "-u")
+        git(compiler, "commit", "-m", "remove required synthetic compiler source")
+        with self.assertRaisesRegex(candidate.CandidateError, "required build input missing or excluded"):
+            candidate.collect_plan(make_args(self.source, self.output_parent))
         self.assertEqual(list(self.output_parent.iterdir()), [])
 
     def test_existing_tag_refused_before_staging(self):
@@ -752,6 +989,73 @@ class IsolatedCandidateTests(unittest.TestCase):
             with self.subTest(content_hash=candidate.hashlib.sha256(data).hexdigest()):
                 with self.assertRaisesRegex(candidate.CandidateError, "private-key material"):
                     candidate.scan_content(data, "synthetic", "src/test.rs")
+
+    def test_python_scanner_regression_literals_are_bounded_and_real_payloads_block(self):
+        safe = (
+            b"class ScannerTests:\n"
+            b"    def test_synthetic_fixture(self):\n"
+            b'        header = b"-----BEGIN PRIVATE KEY-----"\n'
+            b'        payload = b"SyntheticFixturePayloadNotAnActualKey1234567890"\n'
+            b'        data = header + b"\\\\n" + payload\n'
+        )
+        digest = candidate.scan_content(
+            safe, "zpr-demo", "multinode-demo/packaging/test-build-isolated-candidate.py"
+        )
+        self.assertEqual(digest, candidate.hashlib.sha256(safe).hexdigest())
+        references = candidate.private_key_content(
+            safe, "multinode-demo/packaging/test-build-isolated-candidate.py", "zpr-demo"
+        )[1]
+        self.assertEqual(references[0]["role"], "synthetic scanner regression-test literal")
+
+        unsafe = safe.replace(
+            b"SyntheticFixturePayloadNotAnActualKey1234567890",
+            b"A" * 48,
+        )
+        with self.assertRaisesRegex(candidate.CandidateError, "private-key material"):
+            candidate.scan_content(
+                unsafe, "zpr-demo", "multinode-demo/packaging/test-build-isolated-candidate.py"
+            )
+        with self.assertRaisesRegex(candidate.CandidateError, "private-key material"):
+            candidate.scan_content(
+                b'const KEY = "-----BEGIN PRIVATE KEY-----\\n' + b"A" * 48 + b'";\n',
+                "zpr-demo", "multinode-demo/packaging/test-build-isolated-candidate.py",
+            )
+
+    def test_builder_scanner_regex_role_does_not_waive_other_python_headers(self):
+        safe = (
+            b"import re\n"
+            b"generator = re.compile(\n"
+            b"""    rb'^[ \\t]*echo "-----BEGIN PRIVATE KEY-----"\\r?\\n',\n"""
+            b"    re.MULTILINE,\n"
+            b")\n"
+        )
+        self.assertEqual(
+            candidate.scan_content(
+                safe, "zpr-demo", "multinode-demo/packaging/build-isolated-candidate.py"
+            ),
+            candidate.hashlib.sha256(safe).hexdigest(),
+        )
+        unsafe = safe.replace(b"echo ", b"write ")
+        with self.assertRaisesRegex(candidate.CandidateError, "private-key material"):
+            candidate.scan_content(
+                unsafe, "zpr-demo", "multinode-demo/packaging/build-isolated-candidate.py"
+            )
+
+    def test_builder_and_test_files_are_self_scannable_without_path_waiver(self):
+        self.assertRegex(
+            candidate.scan_content(
+                SCRIPT.read_bytes(), "zpr-demo", "multinode-demo/packaging/build-isolated-candidate.py"
+            ),
+            r"^[0-9a-f]{64}$",
+        )
+        self.assertRegex(
+            candidate.scan_content(
+                Path(__file__).read_bytes(),
+                "zpr-demo",
+                "multinode-demo/packaging/test-build-isolated-candidate.py",
+            ),
+            r"^[0-9a-f]{64}$",
+        )
 
     def test_accepted_reference_provenance_and_unknown_fixture_blocker(self):
         repo = self.source / "zpr-utils"

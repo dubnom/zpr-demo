@@ -157,9 +157,35 @@ exemption. In particular, the selected Makefile must support the unique
 requirement. The required `zpr-pki` runtime helper is a file, not a directory.
 Private/cache/artifact exclusions apply inside submodules as well. Allowlists
 cannot admit private paths or symlinked inputs, including symlinked parents.
-Pinned source inventory does not replace Cargo's declared Git dependencies
-with local sibling repositories; dependency downloads follow the selected
+The path-name filter has a narrow exception for the nine required Rust source
+modules under Core's vendored `capnp/src/private/` tree; those files still pass
+the private-key content scanner. Its `layout_test.rs` sibling is excluded
+because the pinned module declares it only under `#[cfg(test)]`, and the
+production build does not compile dependency tests.
+The tracked `zpr-visaservice/vs/src/bin/vsapikey.rs` and Compiler's
+`src/bin/zplc.rs` and `src/bin/zpdump.rs` are likewise admitted as exact Rust
+source targets required by the pinned manifests and build/package scripts.
+The broader `bin` artifact exclusion remains in force (including the unused
+Compiler `zplfmt` target), and these files still pass the private-key content
+scanner. Preflight requires all three source entry points.
+For a published, immutable snapshot, pass one full commit per repository with
+`--revision REPO=FULL_COMMIT`. This mode refuses worktree allowlists and never
+reads or stages worktree edits; all selected sources come from `git archive` at
+the exact commits. It still requires available Git objects and initialized,
+clean submodules at their pinned gitlinks. The report/provenance records the
+revision and tree for every repository and each submodule, plus included-file
+hashes. This does not replace Cargo's declared Git dependencies with local
+sibling repositories; dependency downloads follow the selected
 manifests/lockfiles and this is not a hermetic build.
+
+To capture and inspect an immutable source snapshot before starting Docker,
+use `--stage-only` with a complete `--revision` set. It writes source files,
+`provenance.json`, and an empty artifacts directory under the unique output
+root, but makes no Docker calls. After reviewing the staged hashes and
+`provenance.json`, `--build-staged CANDIDATE_ROOT` rechecks every staged source
+hash and refuses a changed snapshot or nonempty artifacts directory before
+checking Docker tags or building. Use the same candidate root for subsequent
+build evidence; it is never overwritten.
 
 With separately approved execution, missing tools, nonlocal Docker endpoints,
 unavailable Docker, and
@@ -168,9 +194,9 @@ submodule state are rechecked before output creation. Staging uses pinned Git
 commits. Built binaries must have ELF64/amd64 headers; the generated pair is
 checked by the existing package verifier without loading images. Successful
 execution writes `provenance.json` plus `build-results.json` under the new root,
-recording the orchestrator hash, exact local Go version, built image IDs and
-binary/archive hashes. It does not certify the Rust toolchain or claim
-byte-reproducible output. A later build failure leaves only the unique candidate
+recording the orchestrator hash, exact local Go and Rust/Cargo versions, built
+image IDs and binary/archive hashes. It does not certify those toolchains or
+claim byte-reproducible output. A later build failure leaves only the unique candidate
 root and any locally built unique tags for explicit review/cleanup; it never
 silently deletes or overwrites them.
 
@@ -248,6 +274,16 @@ credentials, and a source-independent start/stop/status workflow remain the
 next milestone.
 
 #### Runtime-package development checkpoint
+
+The package-owned `packaging/simulator-config.toml` supplies the Simulator's
+required `runtime/config.toml`. It contains only `[ui] show_static = true`;
+no host credentials, API endpoints, listening overrides, or scenario approvals
+are included. An existing selected runtime configuration must match these exact
+bytes or assembly refuses it. Candidate preflight requires this configuration
+and the Simulator lifecycle, environment, and organization assets before any
+build. Earlier r4 archives omitted the ignored Simulator configuration and
+cannot start the Simulator; keep those archives immutable and use a corrected
+candidate rather than patching an installed r4 release.
 
 The v2 packaging helper now adds package-owned runtime assets. Its `install`
 command requires `--install-dir` for v2 archives and installs the verified pair

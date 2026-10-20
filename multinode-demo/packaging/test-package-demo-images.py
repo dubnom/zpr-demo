@@ -301,10 +301,14 @@ class PackageDemoImagesTest(unittest.TestCase):
         simulator_root = install_dir / "test-release/simulator/runtime"
         paired_runtime = simulator_root / "paired-demo-runtime.sh"
         simulator_runtime = simulator_root / "simulator-demo-runtime.sh"
+        simulator_config = simulator_root / "config.toml"
         self.assertTrue(paired_runtime.is_file())
         self.assertTrue(os.access(paired_runtime, os.X_OK))
         self.assertTrue(simulator_runtime.is_file())
         self.assertTrue(os.access(simulator_runtime, os.X_OK))
+        self.assertEqual(
+            simulator_config.read_bytes(), b"[ui]\nshow_static = true\n"
+        )
         self.assertFalse((simulator_root / "test-paired-demo-runtime.sh").exists())
         simulator_text = simulator_runtime.read_text(encoding="utf-8")
         for variable in (
@@ -505,6 +509,42 @@ exit 2
         replace_runtime_asset(zpr, "runtime/../../outside", b"unsafe")
         result = self.run_script("verify", zpr, simulator, ok=False)
         self.assertIn("unsafe archive path", result.stderr)
+
+    def test_rejects_simulator_runtime_archive_missing_required_config(self):
+        zpr, simulator = self.build()
+        replace_runtime_asset(
+            simulator, "runtime/simulator-demo-runtime.sh", b"#!/bin/sh\nexit 0\n"
+        )
+        self.docker_calls.unlink(missing_ok=True)
+        self.log.unlink(missing_ok=True)
+
+        result = self.run_script("verify", zpr, simulator, ok=False)
+        self.assertIn(
+            "Simulator runtime archive is missing required regular asset "
+            "'runtime/config.toml'",
+            result.stderr,
+        )
+        self.run_script(
+            "install", zpr, simulator,
+            "--install-dir", self.root / "incomplete-install", ok=False,
+        )
+        self.assertFalse(self.docker_calls.exists())
+        self.assertFalse(self.log.exists())
+
+    def test_rejects_noncanonical_simulator_runtime_config(self):
+        zpr, simulator = self.build()
+        replace_runtime_asset(
+            simulator, "runtime/config.toml", b"[ui]\nshow_static = false\n"
+        )
+        self.docker_calls.unlink(missing_ok=True)
+
+        result = self.run_script("verify", zpr, simulator, ok=False)
+        self.assertIn(
+            "Simulator runtime asset 'runtime/config.toml' must contain only "
+            "the package-owned static UI setting",
+            result.stderr,
+        )
+        self.assertFalse(self.docker_calls.exists())
 
     def test_refuses_overwriting_installed_runtime_assets(self):
         zpr, simulator = self.build()

@@ -2,6 +2,7 @@
 """Stage an explicitly reviewed source snapshot and build an isolated demo candidate."""
 
 import argparse
+import ast
 import base64
 from datetime import datetime, timezone
 import hashlib
@@ -16,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tokenize
 import uuid
 
 
@@ -25,6 +27,7 @@ REPOSITORIES = (
     "zpr-utils",
     "zpr-compiler",
     "zpr-dev-tools",
+    "zpr-dev-context",
     "zpr-visaservice",
     "zpr-demo",
 )
@@ -44,10 +47,22 @@ PRIVATE_KEY_HEADER = re.compile(
 PRIVATE_KEY_END = re.compile(
     rb"-----END (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----"
 )
+PRIVATE_KEY_SAMPLE = b"-----BEGIN " + b"PRIVATE KEY-----"
 RELEASE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}\Z")
 MAX_INVENTORY_FILE_SIZE = 256 * 1024 * 1024
 BINARIES = ("ph", "ph-cli", "vs", "vs-admin", "vsapikey", "zplc", "zpdump",
             "zpr-dashboard", "zpr-web-dashboard")
+CAPNP_PRIVATE_SOURCE_PATHS = frozenset(
+    f"vendor/capnproto-rust/capnp/src/private/{name}.rs"
+    for name in ("arena", "capability", "layout", "mask", "mod", "primitive",
+                 "read_limiter", "units", "zero")
+)
+CAPNP_PRIVATE_TEST_PATH = "vendor/capnproto-rust/capnp/src/private/layout_test.rs"
+VISA_APIKEY_BINARY_SOURCE = "vs/src/bin/vsapikey.rs"
+REQUIRED_BINARY_SOURCES = {
+    "zpr-visaservice": (VISA_APIKEY_BINARY_SOURCE,),
+    "zpr-compiler": ("src/bin/zplc.rs", "src/bin/zpdump.rs"),
+}
 
 
 class CandidateError(Exception):
@@ -96,20 +111,47 @@ def split_allowlist(values, label):
     return result
 
 
+def split_revisions(values):
+    revisions = {}
+    for value in values:
+        if "=" not in value:
+            raise CandidateError(f"revision must use repo=FULL_COMMIT form: {value!r}")
+        repository, revision = value.split("=", 1)
+        if repository not in REPOSITORIES:
+            raise CandidateError(f"revision names an unknown repository: {repository!r}")
+        if not re.fullmatch(r"[0-9a-f]{40}", revision):
+            raise CandidateError(f"revision must be a full lowercase commit hash: {repository}")
+        if repository in revisions:
+            raise CandidateError(f"duplicate repository revision: {repository}")
+        revisions[repository] = revision
+    return revisions
+
+
 def exclusion_reason(repository, relative):
     path = PurePosixPath(relative)
     parts = tuple(part.lower() for part in path.parts)
+    required_binary_source = relative in REQUIRED_BINARY_SOURCES.get(repository, ())
     if ".local-runtime" in parts:
         return "local runtime state"
-    if any(part in ARTIFACT_SEGMENTS for part in parts):
+    if (
+        any(part in ARTIFACT_SEGMENTS for part in parts)
+        and not required_binary_source
+    ):
         return "cache or build artifact"
+    if repository == "zpr-core" and relative == CAPNP_PRIVATE_TEST_PATH:
+        return "vendored #[cfg(test)] module not used by production build"
+    if required_binary_source:
+        return ""
     name = path.name.lower()
     if (
         name in PRIVATE_FILENAMES
         or name.startswith(".env")
         or name.endswith(".env")
         or name.endswith(PRIVATE_SUFFIXES)
-        or any(token in part for part in parts for token in PRIVATE_NAME_PARTS)
+        or (
+            relative not in CAPNP_PRIVATE_SOURCE_PATHS
+            and any(token in part for part in parts for token in PRIVATE_NAME_PARTS)
+        )
     ):
         return "credential or private-key path"
     if repository in ("zpr-demo", "zpr-visaservice") and parts[-1:] == (".DS_Store".lower(),):
@@ -302,9 +344,122 @@ def resolve_symlink_chain(relative, target, symlinks, tracked_paths, repository)
     raise CandidateError(f"symlink chain is too deep: {repository}/{relative}")
 
 
-def private_key_content(data, relative):
+def python_scanner_references(data, repository, relative):
+    expected = {
+        "zpr-demo": {
+            "multinode-demo/packaging/build-isolated-candidate.py",
+            "multinode-demo/packaging/test-build-isolated-candidate.py",
+        },
+    }
+    if relative not in expected.get(repository, set()):
+        return data, []
+    try:
+        source = data.decode("utf-8")
+        tree = ast.parse(source)
+        tokens = list(tokenize.tokenize(io.BytesIO(data).readline))
+    except (UnicodeError, SyntaxError, tokenize.TokenError, IndentationError):
+        return data, []
+
+    function_for_line = {
+        line: node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name.startswith("test_")
+        for line in range(node.lineno, (node.end_lineno or node.lineno) + 1)
+    }
+    unsafe_test_functions = set()
+    lines = source.splitlines(keepends=True)
+    line_offsets = []
+    offset = 0
+    for line in lines:
+        line_offsets.append(offset)
+        offset += len(line.encode("utf-8"))
+
+    def safe_test_reference(value):
+        raw = value if isinstance(value, bytes) else value.encode("utf-8")
+        if PRIVATE_KEY_HEADER.search(raw) is None:
+            return False
+        if raw.strip() == PRIVATE_KEY_SAMPLE:
+            return True
+        if PRIVATE_KEY_SAMPLE in raw and PRIVATE_KEY_END.search(raw) is None and not re.search(
+            rb"(?:\r?\n|\\n)[A-Za-z0-9+/=]{32,}", raw
+        ):
+            return True
+        sentinels = re.findall(
+            rb"(?:UnknownSynthetic[A-Za-z]+NotUsableAsAKey\d*|"
+            rb"Synthetic[A-Za-z]+Not(?:AnActualKey|UsableAsAKey)\d*)",
+            raw,
+        )
+        if b"UnknownPayload" in raw or b"synthetic" in raw:
+            sentinels.append(b"synthetic-test-marker")
+        if not sentinels:
+            return False
+        for line in raw.replace(b"\\n", b"\n").splitlines():
+            if re.fullmatch(rb"[A-Za-z0-9+/=]{32,}", line) and not any(
+                sentinel in line for sentinel in sentinels
+            ):
+                return False
+        return True
+
+    def synthetic_payload(raw):
+        return re.fullmatch(
+            rb"(?:UnknownSynthetic[A-Za-z]+NotUsableAsAKey\d*|"
+            rb"Synthetic[A-Za-z]+Not(?:AnActualKey|UsableAsAKey)\d*)",
+            raw,
+        ) is not None
+
+    parsed_tokens = []
+    for token in tokens:
+        if token.type != tokenize.STRING:
+            continue
+        try:
+            value = ast.literal_eval(token.string)
+        except (SyntaxError, ValueError):
+            continue
+        if not isinstance(value, (str, bytes)):
+            continue
+        raw = value if isinstance(value, bytes) else value.encode("utf-8")
+        function = function_for_line.get(token.start[0])
+        if function is not None:
+            for line in raw.replace(b"\\n", b"\n").splitlines():
+                if re.fullmatch(rb"[A-Za-z0-9+/=]{32,}", line) and not synthetic_payload(line):
+                    unsafe_test_functions.add(id(function))
+        parsed_tokens.append((token, value, raw, function))
+
+    masked = bytearray(data)
+    references = []
+    for token, value, raw, function in parsed_tokens:
+        safe_role = ""
+        if (
+            relative.endswith("/build-isolated-candidate.py")
+            and b'echo "' + PRIVATE_KEY_SAMPLE + b'"' in raw
+            and raw.startswith(b"^[")
+            and b"\\r?\\n" in raw
+            and PRIVATE_KEY_END.search(raw) is None
+        ):
+            safe_role = "bounded scanner regex for an exact stdin PEM generator"
+        elif (
+            function is not None
+            and id(function) not in unsafe_test_functions
+            and safe_test_reference(value)
+        ):
+            safe_role = "synthetic scanner regression-test literal"
+        if not safe_role:
+            continue
+        start_line, start_column = token.start
+        end_line, end_column = token.end
+        start = line_offsets[start_line - 1] + len(lines[start_line - 1][:start_column].encode("utf-8"))
+        end = line_offsets[end_line - 1] + len(lines[end_line - 1][:end_column].encode("utf-8"))
+        masked[start:end] = b" " * (end - start)
+        references.append({"line": start_line, "role": safe_role})
+    return bytes(masked), references
+
+
+def private_key_content(data, relative, repository=""):
     masked = data
     references = []
+    masked, python_references = python_scanner_references(masked, repository, relative)
+    references.extend(python_references)
     if re.match(rb"#![^\n]*(?:/bash|/sh|env bash|env sh)(?:\r?\n|$)", data):
         generator = re.compile(
             rb'^[ \t]*echo "-----BEGIN PRIVATE KEY-----"\r?\n'
@@ -344,7 +499,7 @@ def private_key_content(data, relative):
 def scan_content(data, repository, relative):
     if len(data) > MAX_INVENTORY_FILE_SIZE:
         raise CandidateError(f"source file exceeds inventory safety limit: {repository}/{relative}")
-    masked, _ = private_key_content(data, relative)
+    masked, _ = private_key_content(data, relative, repository)
     if PRIVATE_KEY_HEADER.search(masked):
         raise CandidateError(f"private-key material detected in source: {repository}/{relative}")
     return hashlib.sha256(data).hexdigest()
@@ -356,7 +511,7 @@ def inspect_content(data, repository, relative, findings):
     except CandidateError as error:
         if findings is None:
             raise
-        masked, _ = private_key_content(data, relative)
+        masked, _ = private_key_content(data, relative, repository)
         markers = list(PRIVATE_KEY_HEADER.finditer(masked))
         payload = any(
             re.match(rb"(?:\r?\n|\\n)[A-Za-z0-9+/=]{32,}(?:\r?\n|\\n|$)", data[match.end():])
@@ -503,7 +658,7 @@ def archive_inventory(repo, repository, tree, tracked_dirty, untracked, dirty_al
                     "diff_base64": patch_encoded,
                     "diff_redaction": patch_redaction,
                     "content_references": private_key_content(
-                        dirty_data if is_dirty else data, relative,
+                        dirty_data if is_dirty else data, relative, repository,
                     )[1],
                 })
     except tarfile.TarError as exc:
@@ -538,7 +693,7 @@ def archive_inventory(repo, repository, tree, tracked_dirty, untracked, dirty_al
             "dirty": True,
             "untracked": True,
             "mode": "100755" if current.stat().st_mode & 0o111 else "100644",
-            "content_references": private_key_content(current.read_bytes(), relative)[1],
+            "content_references": private_key_content(current.read_bytes(), relative, repository)[1],
         })
     return planned, excluded
 
@@ -546,18 +701,26 @@ def archive_inventory(repo, repository, tree, tracked_dirty, untracked, dirty_al
 def validate_required_inputs(source_root, repos, inventories):
     missing = []
     required = {
-        "zpr-core": ("Cargo.toml", "adapter/ph/Cargo.toml", "adapter/cli/Cargo.toml"),
+        "zpr-core": (
+            "Cargo.toml", "adapter/ph/Cargo.toml", "adapter/cli/Cargo.toml",
+            *sorted(CAPNP_PRIVATE_SOURCE_PATHS),
+        ),
         "zpr-common": ("Cargo.toml",),
         "zpr-utils": ("zpr-utils/Cargo.toml",),
-        "zpr-compiler": ("Cargo.toml",),
+        "zpr-compiler": ("Cargo.toml", *REQUIRED_BINARY_SOURCES["zpr-compiler"]),
         "zpr-dev-tools": ("docker/dev-env/Dockerfile",),
-        "zpr-visaservice": ("Cargo.toml", "zpr-dashboard/go.mod", "zpr-dashboard/go.sum"),
+        "zpr-dev-context": ("README.md",),
+        "zpr-visaservice": (
+            "Cargo.toml", "zpr-dashboard/go.mod", "zpr-dashboard/go.sum",
+            VISA_APIKEY_BINARY_SOURCE,
+        ),
         "zpr-demo": (
             "multinode-demo/Makefile",
             "multinode-demo/Dockerfile.build-linux",
             "multinode-demo/build-linux-amd64.sh",
             "multinode-demo/Dockerfile",
             "multinode-demo/packaging/package-demo-images.py",
+            "multinode-demo/packaging/simulator-config.toml",
         ),
     }
     for repository, paths in required.items():
@@ -604,6 +767,19 @@ def validate_required_inputs(source_root, repos, inventories):
     ):
         if not any(path.startswith(prefix) for path in included_by_repo[repository]):
             missing.append(f"required package runtime directory is empty: {repository}/{prefix}")
+    for relative in (
+        "paired-demo-runtime.sh", "simulator-demo-runtime.sh", "simulation-environment.json",
+        "organizations/demo.json",
+    ):
+        path = "zpr-dashboard/packaging/demo-runtime/" + relative
+        if path not in included_by_repo["zpr-visaservice"]:
+            missing.append(f"required Simulator runtime asset missing or excluded: zpr-visaservice/{path}")
+    config = "multinode-demo/packaging/simulator-config.toml"
+    for item in inventories["zpr-demo"][0]:
+        if item["path"] == "zpr-demo/" + config and item["kind"] == "file":
+            expected = hashlib.sha256(b"[ui]\nshow_static = true\n").hexdigest()
+            if item["sha256"] != expected:
+                missing.append("package-owned Simulator configuration must contain only the static UI setting")
     if "zpr-dashboard/scripts/Dockerfile.simulator" not in included_by_repo["zpr-visaservice"]:
         missing.append("required Simulator Dockerfile missing or excluded")
     return missing
@@ -632,6 +808,16 @@ def collect_plan(args, run_id=None):
 
     dirty_allowlist = split_allowlist(args.include_dirty, "tracked allowlist")
     untracked_allowlist = split_allowlist(args.include_untracked, "untracked allowlist")
+    revisions = split_revisions(getattr(args, "revision", []))
+    immutable = bool(revisions)
+    if immutable and set(revisions) != set(REPOSITORIES):
+        missing = sorted(set(REPOSITORIES) - set(revisions))
+        extra = sorted(set(revisions) - set(REPOSITORIES))
+        raise CandidateError(
+            f"immutable revision set must pin every repository; missing={missing}, extra={extra}"
+        )
+    if immutable and (dirty_allowlist or untracked_allowlist):
+        raise CandidateError("immutable revision mode cannot use worktree allowlists")
     overlap = dirty_allowlist & untracked_allowlist
     if overlap:
         raise CandidateError(f"path appears in both allowlists: {sorted(overlap)}")
@@ -640,8 +826,15 @@ def collect_plan(args, run_id=None):
     inventories = {}
     findings = []
     for name, repo in repos.items():
-        head = run_git(repo, "rev-parse", "HEAD").strip()
-        tracked_dirty, untracked = parse_status(repo)
+        if immutable:
+            head = run_git(repo, "rev-parse", "--verify", f"{revisions[name]}^{{commit}}").strip()
+            if head != revisions[name]:
+                raise CandidateError(f"revision did not resolve to its exact commit: {name}")
+            run_git(repo, "cat-file", "-e", f"{head}^{{commit}}")
+            tracked_dirty, untracked = set(), set()
+        else:
+            head = run_git(repo, "rev-parse", "HEAD").strip()
+            tracked_dirty, untracked = parse_status(repo)
         tree = parse_tree(repo, head)
         submodules = verify_submodules(repo, name, tree, head, findings)
         for submodule in submodules:
@@ -658,13 +851,15 @@ def collect_plan(args, run_id=None):
             head, findings,
         )
         inventories[name] = (planned, excluded, tree, tracked_dirty, untracked)
-        if run_git(repo, "rev-parse", "HEAD").strip() != head:
+        if not immutable and run_git(repo, "rev-parse", "HEAD").strip() != head:
             raise CandidateError(f"source HEAD changed during preflight: {name}")
-        branch = run_git(repo, "branch", "--show-current").strip()
+        branch = "" if immutable else run_git(repo, "branch", "--show-current").strip()
         repository_plans[name] = {
             "head": head,
             "tree": run_git(repo, "rev-parse", f"{head}^{{tree}}").strip(),
             "branch": branch,
+            "source_method": "pinned commit archive; worktree excluded" if immutable
+            else "HEAD plus exact worktree allowlists",
             "tracked_dirty": sorted(f"{name}/{path}" for path in tracked_dirty),
             "untracked": sorted(f"{name}/{path}" for path in untracked),
             "unapproved_dirty": sorted(
@@ -675,7 +870,7 @@ def collect_plan(args, run_id=None):
             "included": planned,
             "excluded": excluded,
             "submodules": submodules,
-            "ignored": [
+            "ignored": [] if immutable else [
                 {"path": f"{name}/{path}", "reason": exclusion_reason(name, path.rstrip("/")) or "unapproved ignored input"}
                 for path in run_git(
                     repo, "ls-files", "--others", "--ignored", "--exclude-standard",
@@ -700,6 +895,9 @@ def collect_plan(args, run_id=None):
     )
     if selected_makefile is not None:
         makefile = (
+            run_git(repos["zpr-demo"], "show",
+                    f"{repository_plans['zpr-demo']['head']}:{makefile_path}", binary=True)
+            if immutable else
             worktree_input(repos["zpr-demo"], makefile_path).read_bytes()
             if selected_makefile["dirty"] else
             run_git(repos["zpr-demo"], "show",
@@ -750,6 +948,7 @@ def collect_plan(args, run_id=None):
     ]
     return {
         "source_root": str(source_root),
+        "source_mode": "immutable-commits" if immutable else "worktree-snapshot",
         "observed_at": datetime.now(timezone.utc).isoformat(),
         "output_parent": str(output_parent),
         "candidate_root": str(candidate_root),
@@ -768,6 +967,7 @@ def collect_plan(args, run_id=None):
         "missing_inputs": missing_inputs,
         "approved_dirty": sorted(dirty_allowlist),
         "approved_untracked": sorted(untracked_allowlist),
+        "requested_revisions": revisions,
         "prerequisites": {
             "tools": tools,
             "free_disk_bytes": shutil.disk_usage(output_parent).free,
@@ -897,11 +1097,19 @@ def stage_candidate(plan, repos, inventories, candidate_root):
         raise CandidateError("candidate preflight is blocked; refusing to stage")
     for repository, repo in repos.items():
         expected = plan["repositories"][repository]
-        if run_git(repo, "rev-parse", "HEAD").strip() != expected["head"]:
+        run_git(repo, "cat-file", "-e", f"{expected['head']}^{{commit}}")
+        if (
+            plan["source_mode"] != "immutable-commits"
+            and run_git(repo, "rev-parse", "HEAD").strip() != expected["head"]
+        ):
             raise CandidateError(f"source HEAD changed after preflight: {repository}")
         if verify_submodules(repo, repository, inventories[repository][2]) != expected["submodules"]:
             raise CandidateError(f"submodule state changed after preflight: {repository}")
-        for item in expected["included"]:
+        for item in (
+            expected["included"]
+            if plan["source_mode"] != "immutable-commits"
+            else ()
+        ):
             if not item.get("dirty"):
                 continue
             relative = item["path"][len(repository) + 1:]
@@ -918,7 +1126,7 @@ def stage_candidate(plan, repos, inventories, candidate_root):
     candidate_root.mkdir(mode=0o700)
     source = candidate_root / "source"
     for repository, repo in repos.items():
-        head = run_git(repo, "rev-parse", "HEAD").strip()
+        head = plan["repositories"][repository]["head"]
         if head != plan["repositories"][repository]["head"]:
             raise CandidateError(f"source HEAD changed after preflight: {repository}")
         stage_repository(
@@ -927,6 +1135,7 @@ def stage_candidate(plan, repos, inventories, candidate_root):
         )
     provenance = {
         "schema": "zpr.isolated-candidate-provenance.v1",
+        "candidate_root": str(candidate_root),
         "release_id": plan["release_id"],
         "run_id": plan["run_id"],
         "source_root": plan["source_root"],
@@ -934,6 +1143,9 @@ def stage_candidate(plan, repos, inventories, candidate_root):
         "repositories": plan["repositories"],
         "docker_tags": plan["docker_tags"],
         "commands": plan["commands"],
+        "artifact_paths": plan["artifact_paths"],
+        "source_mode": plan["source_mode"],
+        "requested_revisions": plan["requested_revisions"],
         "approved_dirty": plan["approved_dirty"],
         "approved_untracked": plan["approved_untracked"],
         "orchestrator": plan["orchestrator"],
@@ -949,14 +1161,81 @@ def execute_plan(plan, repos, inventories, candidate_root, runner=subprocess.run
     if plan.get("blockers"):
         raise CandidateError("candidate preflight is blocked; refusing to execute")
     verify_docker_tags(plan["docker_tags"], runner=runner)
+    source, artifacts = stage_candidate(plan, repos, inventories, candidate_root)
+    return build_candidate(plan, candidate_root, source, artifacts, runner)
+
+
+def stage_only(plan, repos, inventories, candidate_root):
+    if plan.get("blockers"):
+        raise CandidateError("candidate preflight is blocked; refusing to stage")
+    return stage_candidate(plan, repos, inventories, candidate_root)
+
+
+def verify_staged_repository(source, repository, details):
+    base = source / repository
+    for item in details["included"]:
+        relative = item["path"][len(repository) + 1:]
+        path = base / relative
+        if item["kind"] == "symlink":
+            if not path.is_symlink() or os.readlink(path) != item["target"]:
+                raise CandidateError(f"staged source symlink mismatch: {item['path']}")
+        elif item["kind"] == "file":
+            if path.is_symlink() or not path.is_file():
+                raise CandidateError(f"staged source file missing or unsafe: {item['path']}")
+            if hashlib.sha256(path.read_bytes()).hexdigest() != item["sha256"]:
+                raise CandidateError(f"staged source hash mismatch: {item['path']}")
+        elif item["kind"] != "deleted":
+            raise CandidateError(f"unsupported staged source record: {item['path']}")
+    for submodule in details.get("submodules", []):
+        verify_staged_repository(source, f"{repository}/{submodule['path']}", submodule)
+
+
+def build_staged(candidate_root, runner=subprocess.run):
+    candidate_root = Path(candidate_root)
+    if candidate_root.is_symlink() or not candidate_root.is_dir():
+        raise CandidateError("staged candidate root must be an existing non-symlink directory")
+    provenance_path = candidate_root / "provenance.json"
+    if provenance_path.is_symlink() or not provenance_path.is_file():
+        raise CandidateError("staged candidate provenance is missing or unsafe")
+    try:
+        provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise CandidateError("staged candidate provenance is invalid") from error
+    if (
+        provenance.get("schema") != "zpr.isolated-candidate-provenance.v1"
+        or provenance.get("source_mode") != "immutable-commits"
+        or Path(provenance.get("candidate_root", "")).resolve() != candidate_root.resolve()
+    ):
+        raise CandidateError("staged candidate is not a matching immutable committed snapshot")
+    source = candidate_root / "source"
+    for repository in REPOSITORIES:
+        details = provenance.get("repositories", {}).get(repository)
+        if details is None or len(details.get("head", "")) != 40:
+            raise CandidateError(f"staged provenance lacks an exact repository pin: {repository}")
+        verify_staged_repository(source, repository, details)
+    artifacts = candidate_root / "artifacts"
+    if artifacts.is_symlink() or not artifacts.is_dir() or any(artifacts.iterdir()):
+        raise CandidateError("staged artifact directory must exist and be empty before build")
+    plan = {
+        "release_id": provenance["release_id"],
+        "run_id": provenance["run_id"],
+        "docker_tags": provenance["docker_tags"],
+        "commands": provenance["commands"],
+        "artifact_paths": provenance["artifact_paths"],
+        "repositories": provenance["repositories"],
+    }
+    return build_candidate(plan, candidate_root, source, artifacts, runner)
+
+
+def build_candidate(plan, candidate_root, source, artifacts, runner=subprocess.run):
+    verify_docker_tags(plan["docker_tags"], runner=runner)
     go_version = runner(
         ["go", "version"], check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, env={**os.environ, "GOTOOLCHAIN": "local"},
     )
     if go_version.returncode:
-        raise CandidateError("local Go toolchain version check failed before staging")
-    source, artifacts = stage_candidate(plan, repos, inventories, candidate_root)
-    verify_docker_tags(plan["docker_tags"], runner=runner)
+        raise CandidateError("local Go toolchain version check failed before build")
+    rust_toolchain = None
     for index, command in enumerate(plan["commands"]):
         if index in (1, 2):
             name = "zpr" if index == 1 else "simulator"
@@ -976,6 +1255,24 @@ def execute_plan(plan, repos, inventories, candidate_root, runner=subprocess.run
                     header = stream.read(20)
                 if len(header) != 20 or header[:6] != b"\x7fELF\x02\x01" or header[18:20] != b"\x3e\x00":
                     raise CandidateError(f"built binary is not ELF64 little-endian amd64: {name}")
+            versions = runner(
+                [
+                    "docker", "run", "--rm", "--platform", "linux/amd64",
+                    plan["docker_tags"]["builder"], "/bin/bash", "-c",
+                    "rustc --version && cargo --version",
+                ],
+                check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            if versions.returncode:
+                raise CandidateError("cannot record Rust/Cargo versions from the isolated builder image")
+            version_lines = versions.stdout.splitlines()
+            if (
+                len(version_lines) != 2
+                or not version_lines[0].startswith("rustc ")
+                or not version_lines[1].startswith("cargo ")
+            ):
+                raise CandidateError("isolated builder returned invalid Rust/Cargo version data")
+            rust_toolchain = {"rustc": version_lines[0], "cargo": version_lines[1]}
     images = {}
     for name in ("builder", "zpr", "simulator"):
         result = runner(
@@ -992,6 +1289,8 @@ def execute_plan(plan, repos, inventories, candidate_root, runner=subprocess.run
         except (ValueError, KeyError, TypeError) as error:
             raise CandidateError(f"invalid built image metadata: {name}") from error
         images[name] = {"tag": plan["docker_tags"][name], "id": image_id, "platform": "linux/amd64"}
+    if rust_toolchain is None:
+        raise CandidateError("Rust/Cargo toolchain versions were not captured")
     hashes = {}
     for path in (*[source / "zpr-demo/multinode-demo/bin" / name for name in BINARIES],
                  *map(Path, plan["artifact_paths"])):
@@ -1002,9 +1301,20 @@ def execute_plan(plan, repos, inventories, candidate_root, runner=subprocess.run
             for chunk in iter(lambda: stream.read(1024 * 1024), b""):
                 digest.update(chunk)
         hashes[str(path.relative_to(candidate_root))] = digest.hexdigest()
+    orchestrator_path = Path(__file__).resolve()
     write_file(candidate_root / "build-results.json", (json.dumps({
         "schema": "zpr.isolated-candidate-results.v1",
         "go_version": go_version.stdout.strip(),
+        "rust_toolchain": rust_toolchain,
+        "rust_toolchain_probe": [
+            "docker", "run", "--rm", "--platform", "linux/amd64",
+            plan["docker_tags"]["builder"], "/bin/bash", "-c",
+            "rustc --version && cargo --version",
+        ],
+        "build_orchestrator": {
+            "path": str(orchestrator_path),
+            "sha256": hashlib.sha256(orchestrator_path.read_bytes()).hexdigest(),
+        },
         "python_version": sys.version,
         "images": images,
         "sha256": hashes,
@@ -1016,16 +1326,22 @@ def execute_plan(plan, repos, inventories, candidate_root, runner=subprocess.run
 
 def make_parser():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source-root", required=True)
-    parser.add_argument("--output-parent", required=True)
-    parser.add_argument("--release-id", required=True)
+    parser.add_argument("--source-root")
+    parser.add_argument("--output-parent")
+    parser.add_argument("--release-id")
     parser.add_argument("--include-dirty", action="append", default=[], metavar="REPO:PATH")
     parser.add_argument("--include-untracked", action="append", default=[], metavar="REPO:PATH")
+    parser.add_argument("--revision", action="append", default=[], metavar="REPO=FULL_COMMIT",
+                        help="pin an immutable commit for every repository and ignore worktree changes")
     parser.add_argument("--preflight-report", action="store_true",
                         help="dry-run only: emit a content-redacted plan even when source checks block execution")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true", help="print the complete read-only plan (default)")
     mode.add_argument("--execute", action="store_true", help="stage and run the local build/package plan")
+    mode.add_argument("--stage-only", action="store_true",
+                      help="stage the reviewed source snapshot without contacting Docker")
+    mode.add_argument("--build-staged", metavar="CANDIDATE_ROOT",
+                      help="build an already-staged immutable candidate after verifying its source hashes")
     parser.set_defaults(dry_run=True)
     return parser
 
@@ -1034,7 +1350,21 @@ def main(argv=None):
     args = make_parser().parse_args(argv)
     if args.execute:
         args.dry_run = False
-    if args.execute and args.preflight_report:
+    if args.build_staged:
+        if args.revision or args.include_dirty or args.include_untracked or args.preflight_report:
+            print("error: --build-staged cannot be combined with source-selection options", file=sys.stderr)
+            return 1
+        try:
+            build_staged(args.build_staged)
+        except (CandidateError, OSError, UnicodeError, subprocess.SubprocessError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print(f"Candidate build complete at {Path(args.build_staged).resolve()}")
+        return 0
+    if not args.source_root or not args.output_parent or not args.release_id:
+        print("error: --source-root, --output-parent, and --release-id are required", file=sys.stderr)
+        return 1
+    if (args.execute or args.stage_only) and args.preflight_report:
         print("error: --preflight-report cannot be used with --execute", file=sys.stderr)
         return 1
     try:
@@ -1043,7 +1373,10 @@ def main(argv=None):
         if plan["blockers"]:
             print("error: preflight blocked; report is not authorization to stage or build", file=sys.stderr)
             return 1
-        if args.execute:
+        if args.stage_only:
+            stage_only(plan, repos, inventories, candidate_root)
+            print(f"Candidate source staged at {candidate_root}")
+        elif args.execute:
             execute_plan(plan, repos, inventories, candidate_root)
             print(f"Candidate staged at {candidate_root}")
     except (CandidateError, OSError, UnicodeError, subprocess.SubprocessError) as exc:
