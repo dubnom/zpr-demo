@@ -19,7 +19,7 @@ services:
       - ${ZPR_DEMO_STATE_DIR}/logs:/logs
     networks:
       zpr-demo:
-        ipv4_address: 172.30.0.13
+        ipv4_address: ${ZPR_NETWORK_BASE:-172.30.0}.13
 
   node1:
     image: ${ZPR_DEMO_IMAGE_REFERENCE:?validated by zpr-demo-runtime}
@@ -40,10 +40,10 @@ services:
       - ${ZPR_DEMO_STATE_DIR}/include:/conf/include:ro
       - ${ZPR_DEMO_STATE_DIR}/logs:/logs
     ports:
-      - "127.0.0.1:5000:5000/tcp"
+      - "127.0.0.1:${ZPR_NODE1_HOST_PORT:-5000}:5000/tcp"
     networks:
       zpr-demo:
-        ipv4_address: 172.30.0.10
+        ipv4_address: ${ZPR_NETWORK_BASE:-172.30.0}.10
 
   vs:
     image: ${ZPR_DEMO_IMAGE_REFERENCE:?validated by zpr-demo-runtime}
@@ -65,10 +65,10 @@ services:
       - ${ZPR_DEMO_STATE_DIR}/state/redis:/state
       - ${ZPR_DEMO_STATE_DIR}/logs:/logs
     ports:
-      - "127.0.0.1:8185:8183/tcp"
+      - "127.0.0.1:${ZPR_VS_ADMIN_PORT:-8185}:8183/tcp"
     networks:
       zpr-demo:
-        ipv4_address: 172.30.0.11
+        ipv4_address: ${ZPR_NETWORK_BASE:-172.30.0}.11
 
   web0:
     image: ${ZPR_DEMO_IMAGE_REFERENCE:?validated by zpr-demo-runtime}
@@ -94,7 +94,7 @@ services:
       - ${ZPR_DEMO_STATE_DIR}/logs:/logs
     networks:
       zpr-demo:
-        ipv4_address: 172.30.0.14
+        ipv4_address: ${ZPR_NETWORK_BASE:-172.30.0}.14
 
   web1:
     image: ${ZPR_DEMO_IMAGE_REFERENCE:?validated by zpr-demo-runtime}
@@ -118,7 +118,7 @@ services:
       - ${ZPR_DEMO_STATE_DIR}/logs:/logs
     networks:
       zpr-demo:
-        ipv4_address: 172.30.0.12
+        ipv4_address: ${ZPR_NETWORK_BASE:-172.30.0}.12
 
   alice:
     image: ${ZPR_DEMO_IMAGE_REFERENCE:?validated by zpr-demo-runtime}
@@ -140,10 +140,10 @@ services:
       - ${ZPR_DEMO_STATE_DIR}/logs:/logs
     networks:
       zpr-demo:
-        ipv4_address: 172.30.0.15
+        ipv4_address: ${ZPR_NETWORK_BASE:-172.30.0}.15
 
 networks:
   zpr-demo:
     ipam:
       config:
-        - subnet: 172.30.0.0/24
+        - subnet: ${ZPR_NETWORK_SUBNET:-172.30.0.0/24}

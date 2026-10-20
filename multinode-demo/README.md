@@ -399,6 +399,15 @@ separate host ports: `8185` for the legacy/Load Lab deployment and `8186` for
 other organization deployments by default. Set `ZPR_VS_ADMIN_PORT` to override
 an organization's port when needed.
 
+The installed Linux demo package defaults to `172.30.0.0/24`. When that range
+is already in use, set `ZPR_NETWORK_SUBNET` to an unused RFC 1918 IPv4 `/24`
+before `zpr-demo-runtime.sh start`; the package derives its fixed host addresses
+from that subnet. Docker Compose rejects overlapping Docker networks, but
+operators must also check host routes and other networks before selecting it.
+The default loopback host ports are Visa admin `8185` and node1 control `5000`;
+set `ZPR_VS_ADMIN_PORT` and `ZPR_NODE1_HOST_PORT` to unused ports when a live
+demo already owns them.
+
 Organization redeploy also rebuilds the Simulator DNS binding against the
 current node0 container and checks service records. Stop removes that binding
 before removing its node. DNS zones and TSIG credentials remain organization

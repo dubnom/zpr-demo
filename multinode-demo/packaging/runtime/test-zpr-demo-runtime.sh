@@ -103,6 +103,9 @@ if [ "$1" = image ]; then
     exit 0
 fi
 [ "$1" = compose ] || exit 2
+printf 'network-base=%s vs-port=%s node1-port=%s\n' \
+    "${ZPR_NETWORK_BASE:-}" "${ZPR_VS_ADMIN_PORT:-}" "${ZPR_NODE1_HOST_PORT:-}" \
+    >> "$FAKE_DOCKER_LOG"
 shift
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -191,13 +194,15 @@ case "$action" in
             /app/bin/ph-cli)
                 case "$service" in
                     node0)
-                        printf '172.30.0.10:5000 (Active)\n172.30.0.11:5000 (Active)\n'
+                        printf '%s.10:5000 (Active)\n%s.11:5000 (Active)\n' \
+                            "${ZPR_NETWORK_BASE:-172.30.0}" "${ZPR_NETWORK_BASE:-172.30.0}"
                         if grep -Fxq web0-adapter "$FAKE_SESSIONS"; then
-                            printf '172.30.0.14:5000 (Active)\n'
+                            printf '%s.14:5000 (Active)\n' "${ZPR_NETWORK_BASE:-172.30.0}"
                         fi
                         ;;
                     node1)
-                        printf '172.30.0.13:5000 (Active)\n172.30.0.15:5000 (Active)\n'
+                        printf '%s.13:5000 (Active)\n%s.15:5000 (Active)\n' \
+                            "${ZPR_NETWORK_BASE:-172.30.0}" "${ZPR_NETWORK_BASE:-172.30.0}"
                         ;;
                     *) exit 2 ;;
                 esac
@@ -332,17 +337,54 @@ assert_contains "$output" "does not match the package's pinned"
 init_count_after=$(wc -l < "$FAKE_INIT_LOG" | tr -d ' ')
 [ "$init_count_before" -eq "$init_count_after" ] || fail "identity initializer ran before image validation"
 
-printf 'wrong-reference\n' > "$RUNTIME_DIR/image-reference"
-if output=$(run_runtime status 2>&1); then
-    fail "status accepted a package image-reference mismatch"
-fi
-assert_contains "$output" "manifest, release directory, or image-reference"
-
 if ! grep -Fq '/include:/conf/include:ro' "$SCRIPT_DIR/zpr-demo-compose.yml"; then
     fail "Compose does not mount the shared identity include directory read-only"
 fi
 if grep -Eq '^[[:space:]]+build:' "$SCRIPT_DIR/zpr-demo-compose.yml"; then
     fail "Compose contains a build directive"
 fi
+if ! grep -Fq 'subnet: ${ZPR_NETWORK_SUBNET:-172.30.0.0/24}' "$SCRIPT_DIR/zpr-demo-compose.yml" ||
+    ! grep -Fq 'ipv4_address: ${ZPR_NETWORK_BASE:-172.30.0}.10' "$SCRIPT_DIR/zpr-demo-compose.yml" ||
+    ! grep -Fq '127.0.0.1:${ZPR_VS_ADMIN_PORT:-8185}:8183/tcp' "$SCRIPT_DIR/zpr-demo-compose.yml" ||
+    ! grep -Fq '127.0.0.1:${ZPR_NODE1_HOST_PORT:-5000}:5000/tcp' "$SCRIPT_DIR/zpr-demo-compose.yml"; then
+    fail "Compose does not support validated non-conflicting network and host ports"
+fi
+
+if output=$(ZPR_NETWORK_SUBNET=172.31.0.0/23 run_runtime start 2>&1); then
+    fail "start accepted a non-/24 network subnet"
+fi
+assert_contains "$output" "ZPR_NETWORK_SUBNET must be an RFC 1918 IPv4 /24"
+if output=$(ZPR_NETWORK_SUBNET=192.0.2.0/24 run_runtime start 2>&1); then
+    fail "start accepted a non-private network subnet"
+fi
+assert_contains "$output" "ZPR_NETWORK_SUBNET must be an RFC 1918 IPv4 /24"
+
+if output=$(ZPR_VS_ADMIN_PORT=80 run_runtime start 2>&1); then
+    fail "start accepted a privileged Visa admin host port"
+fi
+assert_contains "$output" "demo host ports must be decimal integers from 1024 through 65535"
+if output=$(ZPR_VS_ADMIN_PORT=5001 ZPR_NODE1_HOST_PORT=5001 run_runtime start 2>&1); then
+    fail "start accepted duplicate demo host ports"
+fi
+assert_contains "$output" "Visa and node1 host ports must be different"
+
+output=$(ZPR_NETWORK_SUBNET=172.31.0.0/24 ZPR_VS_ADMIN_PORT=8186 \
+    ZPR_NODE1_HOST_PORT=5001 run_runtime start 2>&1) ||
+    fail "start failed with an explicit non-conflicting subnet: $output"
+assert_contains "$output" "ZPR demo services started"
+grep -Fxq 'network-base=172.31.0 vs-port=8186 node1-port=5001' "$FAKE_DOCKER_LOG" ||
+    fail "Docker Compose did not receive the explicit network and port configuration"
+output=$(ZPR_NETWORK_SUBNET=172.31.0.0/24 ZPR_VS_ADMIN_PORT=8186 \
+    ZPR_NODE1_HOST_PORT=5001 run_runtime smoke 2>&1) ||
+    fail "smoke failed with the explicit network subnet: $output"
+output=$(ZPR_NETWORK_SUBNET=172.31.0.0/24 ZPR_VS_ADMIN_PORT=8186 \
+    ZPR_NODE1_HOST_PORT=5001 run_runtime stop 2>&1) ||
+    fail "stop failed with the explicit network subnet: $output"
+
+printf 'wrong-reference\n' > "$RUNTIME_DIR/image-reference"
+if output=$(run_runtime status 2>&1); then
+    fail "status accepted a package image-reference mismatch"
+fi
+assert_contains "$output" "manifest, release directory, or image-reference"
 
 printf 'PASS: source-independent ZPR start/stop/status/smoke, policy preservation, image pinning, and no-build/no-pull orchestration (Docker mocked).\n'

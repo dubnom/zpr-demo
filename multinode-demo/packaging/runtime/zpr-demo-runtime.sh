@@ -168,6 +168,53 @@ compose() {
         --file "$COMPOSE_FILE" "$@"
 }
 
+configure_network_subnet() {
+    network_subnet=${ZPR_NETWORK_SUBNET:-172.30.0.0/24}
+    network_base=$(python3 - "$network_subnet" <<'PY'
+import ipaddress
+import sys
+
+try:
+    network = ipaddress.ip_network(sys.argv[1], strict=True)
+except ValueError as error:
+    raise SystemExit(f"invalid ZPR_NETWORK_SUBNET: {error}")
+
+private_ranges = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+)
+if (
+    not isinstance(network, ipaddress.IPv4Network)
+    or network.prefixlen != 24
+    or not any(network.subnet_of(private_range) for private_range in private_ranges)
+):
+    raise SystemExit("ZPR_NETWORK_SUBNET must be an RFC 1918 IPv4 /24")
+
+print(str(network.network_address).rsplit(".", 1)[0])
+PY
+    ) || fail "invalid ZPR_NETWORK_SUBNET"
+    export ZPR_NETWORK_SUBNET="$network_subnet"
+    export ZPR_NETWORK_BASE="$network_base"
+}
+
+configure_host_ports() {
+    vs_port=${ZPR_VS_ADMIN_PORT:-8185}
+    node1_port=${ZPR_NODE1_HOST_PORT:-5000}
+    for port in "$vs_port" "$node1_port"; do
+        case "$port" in
+            ""|*[!0-9]*) fail "demo host ports must be decimal integers from 1024 through 65535" ;;
+        esac
+        if [ "$port" -lt 1024 ] || [ "$port" -gt 65535 ]; then
+            fail "demo host ports must be decimal integers from 1024 through 65535"
+        fi
+    done
+    [ "$vs_port" != "$node1_port" ] ||
+        fail "Visa and node1 host ports must be different"
+    export ZPR_VS_ADMIN_PORT="$vs_port"
+    export ZPR_NODE1_HOST_PORT="$node1_port"
+}
+
 validate_compose() {
     compose version >/dev/null 2>&1 || fail "Docker Compose v2 is required"
     compose config --quiet || fail "Docker Compose rejected the installed runtime configuration"
@@ -346,9 +393,9 @@ wait_for_stable_network() {
         attempt=$((attempt + 1))
         if nodes_synchronized &&
             compose exec -T node0 /app/bin/ph-cli -p /var/run/zpr/control.sock link show |
-                grep -F '172.30.0.10:5000' | grep -Fq '(Active)' &&
+                grep -F "$ZPR_NETWORK_BASE.10:5000" | grep -Fq '(Active)' &&
             compose exec -T node1 /app/bin/ph-cli -p /var/run/zpr/control.sock link show |
-                grep -F '172.30.0.13:5000' | grep -Fq '(Active)' &&
+                grep -F "$ZPR_NETWORK_BASE.13:5000" | grep -Fq '(Active)' &&
             compose exec -T alice curl --noproxy '*' -g -6 -fsS \
                 --connect-timeout 2 --max-time 3 'http://[fd5a:5052:8888::8]/' >/dev/null; then
             stable=$((stable + 1))
@@ -366,6 +413,8 @@ wait_for_stable_network() {
 }
 
 start_runtime() {
+    configure_network_subnet
+    configure_host_ports
     validate_loaded_image
     validate_compose
     ZPR_DEMO_PACKAGE_DIR=$PACKAGE_DIR "$RUNTIME_DIR/init-demo-identities.sh" prepare "$STATE_DIR" ||
@@ -462,8 +511,8 @@ PY
 
     launch_session node0 node0 "/app/bin/ph node -c node0-conf.toml"
     launch_session node1 node1 "/app/bin/ph node -c node1-conf.toml"
-    wait_for_link node0 172.30.0.10 "node0 peer link to node1"
-    wait_for_link node1 172.30.0.13 "node1 peer link to node0"
+    wait_for_link node0 "$ZPR_NETWORK_BASE.10" "node0 peer link to node1"
+    wait_for_link node1 "$ZPR_NETWORK_BASE.13" "node1 peer link to node0"
     launch_session vs vs-adapter "/app/bin/ph adapter -c adapter-vs-conf.toml"
     if ! compose exec -T web0 tmux has-session -t web0-adapter >/dev/null 2>&1; then
         attempt=0
@@ -471,7 +520,7 @@ PY
             links=$(compose exec -T node0 /app/bin/ph-cli \
                 -p /var/run/zpr/control.sock link show) ||
                 fail "cannot inspect stale web0 adapter links before registration"
-            if ! printf '%s\n' "$links" | grep -Fq '172.30.0.14:'; then
+            if ! printf '%s\n' "$links" | grep -Fq "$ZPR_NETWORK_BASE.14:"; then
                 break
             fi
             [ "$attempt" -lt 60 ] ||
@@ -482,9 +531,9 @@ PY
     fi
     launch_session web0 web0-adapter "env ZPR_ADAPTER_SERVICES=OciWeb /app/bin/ph adapter -c adapter-web0-conf.toml"
     launch_session alice alice-adapter "/app/bin/ph adapter -c adapter-alice-conf.toml"
-    wait_for_link node0 172.30.0.11 "Visa Service adapter link"
-    wait_for_link node0 172.30.0.14 "web0 adapter link"
-    wait_for_link node1 172.30.0.15 "Alice adapter link"
+    wait_for_link node0 "$ZPR_NETWORK_BASE.11" "Visa Service adapter link"
+    wait_for_link node0 "$ZPR_NETWORK_BASE.14" "web0 adapter link"
+    wait_for_link node1 "$ZPR_NETWORK_BASE.15" "Alice adapter link"
     compose exec -T web0 curl -fsS --connect-timeout 2 --max-time 5 http://localhost:80 >/dev/null ||
         fail "web0 HTTP service did not become ready; inspect package logs under $STATE_DIR/logs"
     wait_for_stable_network
@@ -536,6 +585,8 @@ case "$command_name" in
         start_runtime
         ;;
     smoke)
+        configure_network_subnet
+        configure_host_ports
         validate_compose
         run_smoke
         ;;
