@@ -23,6 +23,8 @@ def write_docker_stub(directory, log_path):
 import hashlib, json, os, sys, tarfile
 from pathlib import Path
 args = sys.argv[1:]
+with open(os.environ["FAKE_DOCKER_CALL_LOG"], "a") as stream:
+    stream.write(" ".join(args) + "\\n")
 def config_for(ref):
     label = "zpr" if ref.startswith("zpr-") else "simulator"
     return json.dumps(
@@ -147,10 +149,12 @@ class PackageDemoImagesTest(unittest.TestCase):
         self.bin = self.root / "bin"
         self.bin.mkdir()
         self.log = self.root / "docker.log"
+        self.docker_calls = self.root / "docker-calls.log"
         write_docker_stub(self.bin, self.log)
         self.env = os.environ.copy()
         self.env["PATH"] = str(self.bin) + os.pathsep + self.env["PATH"]
         self.env["FAKE_DOCKER_LOG"] = str(self.log)
+        self.env["FAKE_DOCKER_CALL_LOG"] = str(self.docker_calls)
         self.output = self.root / "out"
         self.output.mkdir()
         self.zpr_assets = self.root / "zpr-assets"
@@ -181,18 +185,68 @@ class PackageDemoImagesTest(unittest.TestCase):
             self.fail(f"command unexpectedly succeeded: {result.stdout}")
         return result
 
-    def build(self, simulator_runtime_dir=None, zpr_runtime_dir=None):
-        self.run_script(
-            "build", "--release-id", "test-release", "--output-dir", self.output,
+    def run_build(
+        self, *, release_id="test-release", simulator_runtime_dir=None,
+        zpr_runtime_dir=None, zpr_pki_helper=None, ok=True,
+    ):
+        args = [
+            "build", "--release-id", release_id, "--output-dir", self.output,
             "--zpr-image", "zpr-candidate:latest",
             "--simulator-image", "simulator-candidate:latest",
-            "--zpr-runtime-dir", zpr_runtime_dir or self.zpr_assets,
-            "--simulator-runtime-dir", simulator_runtime_dir or self.simulator_assets,
+        ]
+        if zpr_runtime_dir is not None:
+            args.extend(("--zpr-runtime-dir", zpr_runtime_dir))
+        else:
+            args.extend(("--zpr-runtime-dir", self.zpr_assets))
+        if simulator_runtime_dir is not None:
+            args.extend(("--simulator-runtime-dir", simulator_runtime_dir))
+        else:
+            args.extend(("--simulator-runtime-dir", self.simulator_assets))
+        if zpr_pki_helper is not None:
+            args.extend(("--zpr-pki-helper", zpr_pki_helper))
+        return self.run_script(*args, ok=ok)
+
+    def build(self, simulator_runtime_dir=None, zpr_runtime_dir=None):
+        self.run_build(
+            simulator_runtime_dir=simulator_runtime_dir,
+            zpr_runtime_dir=zpr_runtime_dir,
         )
         return (
             self.output / "zpr-demo-test-release.tar",
             self.output / "simulator-test-release.tar",
         )
+
+    def test_rejects_local_runtime_sources_including_symlink_targets(self):
+        docs_root = SCRIPT.resolve().parents[3]
+        local_runtime = docs_root / ".local-runtime"
+        runtime_alias = self.root / "local-runtime-alias"
+        runtime_alias.symlink_to(local_runtime, target_is_directory=True)
+        cases = (
+            ("zpr-runtime-dir", {"zpr_runtime_dir": local_runtime}),
+            ("simulator-runtime-dir", {"simulator_runtime_dir": runtime_alias}),
+            (
+                "zpr-pki-helper",
+                {"zpr_pki_helper": runtime_alias / "simulation-environment.json"},
+            ),
+        )
+        for index, (source_name, options) in enumerate(cases):
+            with self.subTest(source=source_name):
+                result = self.run_build(
+                    release_id=f"blocked-source-{index}",
+                    ok=False,
+                    **options,
+                )
+                self.assertIn(".local-runtime", result.stderr)
+                self.assertFalse(
+                    self.docker_calls.exists(),
+                    "Docker must not be invoked for a prohibited source path",
+                )
+
+    def test_build_accepts_approved_runtime_directories(self):
+        zpr, simulator = self.build()
+        self.assertTrue(zpr.is_file())
+        self.assertTrue(simulator.is_file())
+        self.assertEqual(len(self.docker_calls.read_text().splitlines()), 4)
 
     def test_installs_actual_paired_runtime_assets_without_tests(self):
         docs_root = SCRIPT.parents[3]

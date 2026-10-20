@@ -27,6 +27,16 @@ def fail(message):
     raise ValueError(message)
 
 
+def reject_local_runtime_source(path, docs_root):
+    local_runtime = (Path(docs_root) / ".local-runtime").resolve()
+    resolved_path = Path(path).resolve()
+    try:
+        resolved_path.relative_to(local_runtime)
+    except ValueError:
+        return
+    fail(f"package source path must not resolve inside .local-runtime: {path}")
+
+
 def sha256_stream(stream):
     digest = hashlib.sha256()
     size = 0
@@ -420,8 +430,6 @@ def build(args):
         fail("output directory must already exist")
     if args.zpr_image == args.simulator_image:
         fail("ZPR and Simulator image references must be different")
-    references = (args.zpr_image, args.simulator_image)
-    docker_image_ids = tuple(inspect_image(reference) for reference in references)
     docs_root = Path(__file__).resolve().parents[3]
     runtime_dirs = (
         Path(args.zpr_runtime_dir),
@@ -478,7 +486,13 @@ def build(args):
             (demo_root / "tools/regen-banner.sh", "assets/tools/regen-banner.sh"),
         )
     )
+    for source_path in runtime_dirs:
+        reject_local_runtime_source(source_path, docs_root)
+    for source_path, _ in zpr_runtime_assets:
+        reject_local_runtime_source(source_path, docs_root)
 
+    references = (args.zpr_image, args.simulator_image)
+    docker_image_ids = tuple(inspect_image(reference) for reference in references)
     names = (
         f"zpr-demo-{args.release_id}.tar",
         f"simulator-{args.release_id}.tar",

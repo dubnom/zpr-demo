@@ -85,6 +85,105 @@ produces ELF binaries usable by the Ubuntu containers and OCI hosts, including
 when building from Apple Silicon. The build includes `ph-cli`, which the remote
 deploy uses to verify the peer link.
 
+### Isolated source candidate (engineering use only)
+
+`packaging/build-isolated-candidate.py` plans and, only with `--execute`, stages
+the required Git repositories under a new candidate directory outside the
+source root. Dry-run is the default and performs no writes or Docker calls:
+
+```bash
+python3 packaging/build-isolated-candidate.py \
+  --source-root ../.. \
+  --output-parent /private/tmp \
+  --release-id local-review-01
+```
+
+Use an existing physical output-parent directory outside the source root;
+`/private/tmp` is the macOS example (`/tmp` is a symlink there). On Linux,
+an existing non-symlink `/tmp` is suitable.
+
+For a complete content-redacted source report even when safety findings block
+execution, add `--preflight-report`. It still returns nonzero on blockers and
+cannot be combined with `--execute`. The report includes exact HEAD/tree pins,
+submodule identities, approved and unapproved dirty paths, untracked/ignored
+exclusions, file hashes, finding locations/categories, missing required inputs,
+available tool paths, free disk, and the unique proposed output paths/tags and
+command sequence. Proposed paths/tags are not artifacts and are not created or
+checked against Docker during dry-run. The report never prints matched private
+key contents. The scanner recognizes only bounded Rustdoc header-token lines
+without any PEM end marker/payload-shaped line, and an exact shell generator
+sequence that combines the fixed X25519 DER prefix with stdin. These references
+are recorded in source provenance; source bytes are not rewritten. Other header
+uses and all embedded multiline/escaped-inline key blocks remain blocked,
+including `#[cfg(test)]` fixtures whose origin is unknown. There is no whole-path
+waiver, test-code waiver, or content stripping.
+
+The equivalent read-only Make target is:
+
+```bash
+make candidate-preflight ZPR_ROOT=../.. \
+  CANDIDATE_OUTPUT_PARENT=/private/tmp CANDIDATE_RELEASE_ID=local-review-01
+```
+
+After reviewing the printed source revisions, included-file hashes, exclusions,
+Docker tags, and commands, an explicitly authorized local build can use
+`--execute`. Tracked worktree changes are staged from `HEAD` unless that exact
+`repo:path` is supplied with `--include-dirty`; untracked files are excluded
+unless individually supplied with `--include-untracked`. These allowlists are
+not recursive. The tool rejects missing repositories/required inputs, unsafe
+symlinks, `.local-runtime`, credential/private-key inputs, and cache/build
+artifacts before contacting Docker. It also refuses an existing output root or
+any existing candidate image tag. Candidate build outputs and source provenance
+are isolated from the shared repositories.
+
+The procedure requires a working local Docker daemon and may use Docker base
+images, OS package repositories, Rust dependencies, and Go modules. Its
+floating builder/toolchain and unpinned base images do not establish byte
+reproducibility. It builds local unqualified engineering artifacts only; it
+does not load or start the paired images, install them, publish them, or qualify
+a host or release. The existing `linux-amd64` Make target remains the direct
+shared-worktree build path; use the isolated tool when protecting the shared
+source checkout matters.
+
+Source preflight validates the selected snapshot, not arbitrary working-tree
+files. An explicitly approved tracked replacement is scanned in place of its
+historical HEAD contents; unapproved changes still select and scan HEAD.
+Staging writes approved replacements directly, never first writing their old
+HEAD bytes. If a provenance diff contains rejected historical material, only
+its SHA-256 and a redaction reason are recorded, not its bytes. The selected
+replacement must still pass the unchanged scanner; this is not a fixture
+exemption. In particular, the selected Makefile must support the unique
+`ZPR_BUILDER_IMAGE` tag; an unapproved working-tree fix does not satisfy that
+requirement. The required `zpr-pki` runtime helper is a file, not a directory.
+Private/cache/artifact exclusions apply inside submodules as well. Allowlists
+cannot admit private paths or symlinked inputs, including symlinked parents.
+Pinned source inventory does not replace Cargo's declared Git dependencies
+with local sibling repositories; dependency downloads follow the selected
+manifests/lockfiles and this is not a hermetic build.
+
+With separately approved execution, missing tools, nonlocal Docker endpoints,
+unavailable Docker, and
+existing candidate tags are checked before staging. Approved file hashes and
+submodule state are rechecked before output creation. Staging uses pinned Git
+commits. Built binaries must have ELF64/amd64 headers; the generated pair is
+checked by the existing package verifier without loading images. Successful
+execution writes `provenance.json` plus `build-results.json` under the new root,
+recording the orchestrator hash, exact local Go version, built image IDs and
+binary/archive hashes. It does not certify the Rust toolchain or claim
+byte-reproducible output. A later build failure leaves only the unique candidate
+root and any locally built unique tags for explicit review/cleanup; it never
+silently deletes or overwrites them.
+
+Tracked submodules must already be initialized, checked out at their parent
+gitlink commit, and free of tracked changes, untracked files, and ignored files.
+Their paths must match the pinned `.gitmodules` configuration. Nested submodules
+are rejected; this tool does not initialize, fetch, or repair any submodule.
+Each accepted submodule records its gitlink, observed HEAD, initialization
+status, Git tree ID, and included-file hashes in the plan and provenance.
+Staging reads its pinned Git snapshot, never arbitrary branch/worktree content,
+and rechecks submodule state before creating output. Ordinary file allowlists
+cannot override these submodule requirements.
+
 ### Paired image-only demo archives (experimental)
 
 The packaging helper can export already-built Linux/amd64 ZPR and Simulator
@@ -802,3 +901,98 @@ Identity/configuration files and policy markers still require mode `0600`.
 Smoke makes three bounded direct HTTP attempts, then prints IPv6 routes,
 addresses, node links, and runtime log tails on failure. This helps distinguish
 authorization, routing and forwarding faults without resetting policy.
+
+#### Operator acceptance checklist: established two-machine flow
+
+The checked items below record the existing workbench evidence above; this
+checklist was not run as part of this documentation change. It is not a
+production qualification or a substitute for the explicit host checks below.
+
+- [x] **Prerequisites and package identity — existing workbench evidence.**
+  Use the matching ZPR, Simulator, and scenario-admission packages; verify the
+  archive checksums before installation. The runtime requires an isolated
+  Linux/amd64 disposable demo host, Docker Compose v2, the locally imported
+  package image, and root for the TUN and container setup. Keep the installed
+  package separate from its private persistent state directory. Do not copy
+  generated identities between hosts.
+- [x] **Identity and policy persistence — existing workbench evidence.**
+  A clean-state install generated fresh identities and state. Across the
+  subsequent full stop/start, the identity/configuration fingerprint, compiled
+  policy fingerprint, saved policy marker, and active `policy:current` value
+  were unchanged. Record only whether the before/after fingerprints match;
+  never copy identity files, private keys, credentials, or raw policy state into
+  an acceptance report.
+- [x] **Ordered start and protected HTTP — existing workbench evidence.**
+  The installed-package sequence was ZPR `start --disposable-host`, `smoke`,
+  `operator-start`, and Simulator `simulator-start --disposable-host` followed
+  by `simulator-test`. Startup waits for both named nodes to synchronize, both
+  peer links to be Active, and Alice-to-web0 HTTP to pass six consecutive
+  readiness samples. `smoke` checks the allowed Alice-to-web0 path; the
+  scenario add-on checks real allowed HTTP and an explicit Visa policy denial.
+  A test passes only when the package command exits successfully and the
+  scenario reports its expected authorization outcomes; an arbitrary network
+  failure is not evidence of a policy denial.
+- [x] **Stop/start recovery — existing workbench evidence.**
+  The recorded order was `simulator-stop`, `operator-stop`, then ZPR `stop`;
+  recovery used ZPR `start --disposable-host`, `smoke`, `operator-start`,
+  Simulator `simulator-start --disposable-host`, and `simulator-test`. The
+  allowed path recovered against persisted policy and the authorization
+  scenario passed again. Normal `stop` retains identity, policy, Redis, and log
+  state; it is not a state reset.
+- [ ] **Fresh-host, reboot, and rollback qualification — unverified.**
+  The clean-state test ran on the existing workbench host, not a fresh OS.
+  Host reboot recovery and restoration from a retained `before-clean` backup
+  have not been tested. Do not count a container stop/start as a host reboot.
+  Schedule these only with operator approval, root access, a disposable host,
+  and console/rollback access.
+
+For a future authorized run, the packaged workflow exercised by
+`packaging/runtime/test-clean-installed-workflow.sh` uses the following
+commands. They are documented here as an operator procedure only; they were
+not executed for this change. In that script, `installer` is the verified
+`zpr-cli` in the absolute downloads directory:
+
+```sh
+bash "$installer" install "$downloads"
+bash "$installer" start --disposable-host
+bash "$installer" smoke
+bash "$installer" operator-start
+bash "$installer" simulator-install "$downloads/simulator-scenario-admission-20261019-r6.tar"
+bash "$installer" simulator-start --disposable-host
+bash "$installer" simulator-test
+bash "$installer" simulator-stop
+bash "$installer" operator-stop
+bash "$installer" stop
+bash "$installer" start --disposable-host
+bash "$installer" smoke
+bash "$installer" operator-start
+bash "$installer" simulator-start --disposable-host
+bash "$installer" simulator-test
+bash "$installer" status
+bash "$installer" operator-status
+bash "$installer" simulator-status
+```
+
+The clean-state helper is destructive to the active installation and is not a
+routine restart command. It requires root, an absolute non-symlink downloads
+directory, and the explicit `--disposable-host` acknowledgement. Before
+changing anything it checks the expected container images and labels; it
+retains prior state and managed containers under timestamped `before-clean`
+names. Its failure path preserves new and prior state for inspection; it does
+not provide an automatic rollback.
+
+**Abort gates:** stop and preserve all state if checksum/package identity
+validation fails, an unexpected container or image is found, startup reports a
+pending or unsafe policy-bootstrap state, either peer link fails to become
+Active, the allowed HTTP check fails, or the scenario's expected Visa denial is
+not observed. Do not delete state, clear Redis, remove a pending marker, or
+repeat the clean-state helper to force progress; inspect the retained state
+and logs with the designated operator first.
+
+**Evidence to retain:** UTC time, host role and disposable-host acknowledgement,
+package release and checksum result, command names and exit statuses, status
+and readiness outcomes, whether identity/policy fingerprints match, and
+redacted log excerpts needed to distinguish routing from authorization.
+Exclude keys, certificates, API credentials, full configurations, and raw
+identity or policy contents. Record fresh-host, reboot, and rollback as
+**UNVERIFIED** until each is separately authorized, run, and reviewed.

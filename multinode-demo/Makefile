@@ -1,8 +1,16 @@
 ZPR_ROOT ?=
+ZPR_BUILDER_IMAGE ?= zpr-multinode-builder
+CANDIDATE_OUTPUT_PARENT ?=
+CANDIDATE_RELEASE_ID ?=
 
-.PHONY: all linux-amd64 linux-arm64 ph visaservice compiler dashboard check-zpr-root clean
+.PHONY: all linux-amd64 linux-arm64 ph visaservice compiler dashboard check-zpr-root clean candidate-preflight
 
 all: ph visaservice compiler dashboard
+
+candidate-preflight:
+	python3 packaging/build-isolated-candidate.py --preflight-report --dry-run \
+		--source-root "$(ZPR_ROOT)" --output-parent "$(CANDIDATE_OUTPUT_PARENT)" \
+		--release-id "$(CANDIDATE_RELEASE_ID)"
 
 linux-arm64: check-zpr-root
 	docker build --platform linux/arm64 -t zpr-multinode-arm64-builder \
@@ -15,10 +23,10 @@ linux-arm64: check-zpr-root
 		-ldflags '-s -w' -o "$(CURDIR)/bin/linux-arm64/zpr-web-dashboard" ./cmd/zpr-web-dashboard
 
 linux-amd64: check-zpr-root
-	docker build --platform linux/amd64 -t zpr-multinode-builder \
+	docker build --platform linux/amd64 -t $(ZPR_BUILDER_IMAGE) \
 		-f Dockerfile.build-linux .
 	docker run --rm --platform linux/amd64 -e ZPR_ROOT=/work \
-		-v "$(ZPR_ROOT):/work" zpr-multinode-builder \
+		-v "$(ZPR_ROOT):/work" $(ZPR_BUILDER_IMAGE) \
 		/bin/bash /work/zpr-demo/multinode-demo/build-linux-amd64.sh
 	mkdir -p bin
 	cd "$(ZPR_ROOT)/zpr-visaservice/zpr-dashboard" && \
