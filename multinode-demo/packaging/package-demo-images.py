@@ -171,6 +171,21 @@ def simulator_config_assets(runtime_dir):
     return [(source, "config.toml")]
 
 
+def northstar_policy_assets(runtime_dir, source):
+    source = Path(source)
+    if source.is_symlink() or not source.is_file():
+        fail(f"required Northstar policy source is missing or unsafe: {source}")
+    relative = "organizations/northstar/policy-demo.zplc"
+    existing = Path(runtime_dir) / relative
+    if existing.is_symlink():
+        fail("Northstar packaged policy must not be a symlink")
+    if existing.exists():
+        if not existing.is_file() or existing.read_bytes() != source.read_bytes():
+            fail("Northstar packaged policy differs from its reviewed example source")
+        return []
+    return [(source, relative)]
+
+
 def verify_runtime_archive(runtime_path, expected_package_id):
     try:
         with tarfile.open(runtime_path, "r:") as archive:
@@ -531,6 +546,13 @@ def build(args):
     for source_path, _ in zpr_runtime_assets:
         reject_local_runtime_source(source_path, docs_root)
     simulator_runtime_assets = simulator_config_assets(runtime_dirs[1])
+    simulator_runtime_assets.extend(
+        northstar_policy_assets(
+            runtime_dirs[1],
+            docs_root
+            / "zpr-visaservice/zpr-dashboard/cmd/zpr-web-dashboard/examples/northstar/policy-demo.zplc",
+        )
+    )
 
     references = (args.zpr_image, args.simulator_image)
     docker_image_ids = tuple(inspect_image(reference) for reference in references)

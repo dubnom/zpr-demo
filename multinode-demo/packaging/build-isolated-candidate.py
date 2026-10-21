@@ -59,6 +59,9 @@ CAPNP_PRIVATE_SOURCE_PATHS = frozenset(
 )
 CAPNP_PRIVATE_TEST_PATH = "vendor/capnproto-rust/capnp/src/private/layout_test.rs"
 VISA_APIKEY_BINARY_SOURCE = "vs/src/bin/vsapikey.rs"
+NORTHSTAR_POLICY_SOURCE = (
+    "zpr-dashboard/cmd/zpr-web-dashboard/examples/northstar/policy-demo.zplc"
+)
 REQUIRED_BINARY_SOURCES = {
     "zpr-visaservice": (VISA_APIKEY_BINARY_SOURCE,),
     "zpr-compiler": ("src/bin/zplc.rs", "src/bin/zpdump.rs"),
@@ -713,6 +716,7 @@ def validate_required_inputs(source_root, repos, inventories):
         "zpr-visaservice": (
             "Cargo.toml", "zpr-dashboard/go.mod", "zpr-dashboard/go.sum",
             VISA_APIKEY_BINARY_SOURCE,
+            NORTHSTAR_POLICY_SOURCE,
         ),
         "zpr-demo": (
             "multinode-demo/Makefile",
@@ -769,7 +773,13 @@ def validate_required_inputs(source_root, repos, inventories):
             missing.append(f"required package runtime directory is empty: {repository}/{prefix}")
     for relative in (
         "paired-demo-runtime.sh", "simulator-demo-runtime.sh", "simulation-environment.json",
-        "organizations/demo.json",
+        "organizations/demo.json", "generate-northstar-directory.py",
+        "organizations/northstar.json", "organizations/northstar/README.md",
+        "organizations/northstar/demo-policy-catalog.json",
+        "organizations/northstar/demo-company.ldif",
+        "organizations/northstar/demo-employees.ldif",
+        "organizations/northstar/demo-machines.ldif",
+        "organizations/northstar/demo-roles.ldif",
     ):
         path = "zpr-dashboard/packaging/demo-runtime/" + relative
         if path not in included_by_repo["zpr-visaservice"]:

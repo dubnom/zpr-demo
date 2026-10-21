@@ -32,7 +32,20 @@ REQUIRED_FILES = {
     "zpr-visaservice": (
         "Cargo.toml", "zpr-dashboard/go.mod", "zpr-dashboard/go.sum",
         "zpr-dashboard/scripts/Dockerfile.simulator",
-        "zpr-dashboard/packaging/demo-runtime/runtime.sh",
+        *(
+            "zpr-dashboard/packaging/demo-runtime/" + name
+            for name in (
+                "generate-northstar-directory.py",
+                "organizations/northstar.json",
+                "organizations/northstar/README.md",
+                "organizations/northstar/demo-policy-catalog.json",
+                "organizations/northstar/demo-company.ldif",
+                "organizations/northstar/demo-employees.ldif",
+                "organizations/northstar/demo-machines.ldif",
+                "organizations/northstar/demo-roles.ldif",
+            )
+        ),
+        "zpr-dashboard/cmd/zpr-web-dashboard/examples/northstar/policy-demo.zplc",
         *(f"zpr-dashboard/packaging/demo-runtime/{name}" for name in (
             "paired-demo-runtime.sh", "simulator-demo-runtime.sh",
             "simulation-environment.json", "organizations/demo.json",
@@ -170,6 +183,16 @@ class IsolatedCandidateTests(unittest.TestCase):
             candidate.collect_plan(make_args(self.source, self.output_parent))
         self.assertEqual(list(self.output_parent.iterdir()), [])
 
+    def test_required_northstar_policy_source_fails_preflight_without_writes(self):
+        repo = self.source / "zpr-visaservice"
+        relative = candidate.NORTHSTAR_POLICY_SOURCE
+        (repo / relative).unlink()
+        git(repo, "add", relative)
+        git(repo, "commit", "-m", "missing synthetic Northstar policy")
+        with self.assertRaisesRegex(candidate.CandidateError, "required build input missing"):
+            candidate.collect_plan(make_args(self.source, self.output_parent))
+        self.assertEqual(list(self.output_parent.iterdir()), [])
+
     def test_assembly_supplies_exact_simulator_config_and_rejects_other_inputs(self):
         package_script = SCRIPT.with_name("package-demo-images.py")
         module_spec = importlib.util.spec_from_file_location("candidate_package", package_script)
@@ -185,8 +208,12 @@ class IsolatedCandidateTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("safe synthetic runtime asset\n", encoding="ascii")
         archive = self.base / "runtime.tar"
+        northstar_source = self.base / "northstar-policy-demo.zplc"
+        northstar_source.write_bytes(b"reviewed synthetic Northstar policy\n")
+        extras = package.simulator_config_assets(runtime)
+        extras.extend(package.northstar_policy_assets(runtime, northstar_source))
         package.create_runtime_archive(
-            runtime, archive, extra_files=package.simulator_config_assets(runtime),
+            runtime, archive, extra_files=extras,
         )
         with tarfile.open(archive) as contents:
             self.assertEqual(
@@ -195,11 +222,18 @@ class IsolatedCandidateTests(unittest.TestCase):
                     "runtime/config.toml", "runtime/paired-demo-runtime.sh",
                     "runtime/simulator-demo-runtime.sh", "runtime/simulation-environment.json",
                     "runtime/organizations/demo.json",
+                    "runtime/organizations/northstar/policy-demo.zplc",
                 },
             )
             self.assertEqual(
                 contents.extractfile("runtime/config.toml").read(),
                 b"[ui]\nshow_static = true\n",
+            )
+            self.assertEqual(
+                contents.extractfile(
+                    "runtime/organizations/northstar/policy-demo.zplc"
+                ).read(),
+                northstar_source.read_bytes(),
             )
         config = runtime / "config.toml"
         config.write_text("[ui]\nshow_static = true\n", encoding="ascii")
@@ -216,6 +250,17 @@ class IsolatedCandidateTests(unittest.TestCase):
         config.symlink_to(SCRIPT.with_name("simulator-config.toml"))
         with self.assertRaisesRegex(ValueError, "must not be a symlink"):
             package.simulator_config_assets(runtime)
+        runtime.joinpath("config.toml").unlink()
+        runtime.joinpath("organizations/northstar").mkdir(parents=True)
+        with self.assertRaisesRegex(ValueError, "differs from its reviewed example source"):
+            runtime.joinpath("organizations/northstar/policy-demo.zplc").write_bytes(b"other\n")
+            package.northstar_policy_assets(runtime, northstar_source)
+        runtime.joinpath("organizations/northstar/policy-demo.zplc").unlink()
+        runtime.joinpath("organizations/northstar/policy-demo.zplc").symlink_to(northstar_source)
+        with self.assertRaisesRegex(ValueError, "must not be a symlink"):
+            package.northstar_policy_assets(runtime, northstar_source)
+        with self.assertRaisesRegex(ValueError, "source is missing or unsafe"):
+            package.northstar_policy_assets(runtime, self.base / "missing-policy.zplc")
 
     def test_modified_tracked_files_require_exact_allowlist_and_record_diff(self):
         path = self.source / "zpr-demo/multinode-demo/README.md"

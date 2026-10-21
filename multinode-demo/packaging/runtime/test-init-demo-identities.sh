@@ -184,6 +184,65 @@ else
   [ -z "$(find "$TEMP/state" -type f ! -perm 600 -print)" ] || fail "file mode is not private"
 fi
 
+mkdir -m 700 "$TEMP/root-commands"
+cat > "$TEMP/root-commands/id" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  -u|-g) printf '0\n' ;;
+  *) exec /usr/bin/id "$@" ;;
+esac
+EOF
+cat > "$TEMP/root-commands/stat" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+python3 - "$3" <<'PY'
+import os
+import stat
+import sys
+
+path = sys.argv[1]
+info = os.stat(path)
+owner = info.st_uid
+state_root = os.environ["TEST_ROOT_STATE"]
+if path == state_root or path.startswith(state_root + os.sep):
+    owner = 0
+elif path == os.environ["TEST_FAKE_ANCESTOR"]:
+    owner = 1000
+elif owner == int(os.environ["TEST_REAL_UID"]) and owner != 0:
+    owner = 1000
+print(owner, format(stat.S_IMODE(info.st_mode), "o"), info.st_nlink)
+PY
+EOF
+chmod 700 "$TEMP/root-commands/id" "$TEMP/root-commands/stat"
+TEST_REAL_UID=$(id -u)
+ROOT_TEST_PATH="$TEMP/root-commands:$PATH"
+SUDO_STATE="$TEMP/sudo-state"
+cp "$TEST_DOCKER_LOG" "$TEMP/docker-log-before-root-test"
+env PATH="$ROOT_TEST_PATH" TEST_REAL_UID="$TEST_REAL_UID" TEST_FAKE_ANCESTOR="$TEMP" \
+  TEST_ROOT_STATE="$SUDO_STATE" SUDO_UID=1000 \
+  "$INIT" prepare "$SUDO_STATE" > "$TEMP/output" 2> "$TEMP/diagnostics" ||
+  { cat "$TEMP/diagnostics" >&2; fail "sudo-owned state ancestors were rejected"; }
+[ -s "$SUDO_STATE/.zpr-demo-state-v1" ] || fail "sudo-owned ancestor test did not create complete isolated state"
+NO_SUDO_STATE="$TEMP/no-sudo-state"
+if env PATH="$ROOT_TEST_PATH" TEST_REAL_UID="$TEST_REAL_UID" TEST_FAKE_ANCESTOR="$TEMP" \
+  TEST_ROOT_STATE="$NO_SUDO_STATE" SUDO_UID= \
+  "$INIT" prepare "$NO_SUDO_STATE" > "$TEMP/output" 2> "$TEMP/diagnostics"; then
+  fail "root preparation accepted a non-root-owned ancestor without SUDO_UID"
+fi
+grep -q 'state ancestors must be owned by root, the invoking user, or the sudo user' "$TEMP/diagnostics" ||
+  fail "missing SUDO_UID rejection did not identify the state ancestor"
+[ ! -e "$NO_SUDO_STATE" ] || fail "rejected state path was created"
+INVALID_SUDO_STATE="$TEMP/invalid-sudo-state"
+if env PATH="$ROOT_TEST_PATH" TEST_REAL_UID="$TEST_REAL_UID" TEST_FAKE_ANCESTOR="$TEMP" \
+  TEST_ROOT_STATE="$INVALID_SUDO_STATE" SUDO_UID=invalid \
+  "$INIT" prepare "$INVALID_SUDO_STATE" > "$TEMP/output" 2> "$TEMP/diagnostics"; then
+  fail "root preparation accepted a noncanonical SUDO_UID"
+fi
+grep -q 'SUDO_UID must be a canonical non-negative user ID' "$TEMP/diagnostics" ||
+  fail "invalid SUDO_UID was not rejected explicitly"
+[ ! -e "$INVALID_SUDO_STATE" ] || fail "invalid SUDO_UID path was created"
+cp "$TEMP/docker-log-before-root-test" "$TEST_DOCKER_LOG"
+
 # A complete rerun must not even require package helper/image assets or Docker.
 mv "$TEMP/package/runtime/zpr-pki" "$TEMP/pki-away"
 mv "$TEMP/package/runtime/image-reference" "$TEMP/image-away"

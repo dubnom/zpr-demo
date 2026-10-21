@@ -285,6 +285,11 @@ build. Earlier r4 archives omitted the ignored Simulator configuration and
 cannot start the Simulator; keep those archives immutable and use a corrected
 candidate rather than patching an installed r4 release.
 
+The Northstar packaged `policy-demo.zplc` is sourced from the tracked dashboard
+example at package time when the runtime directory lacks its copy. If present,
+the runtime copy must exactly match the example. Preflight requires and scans
+that example source; it never copies an ignored generated worktree artifact.
+
 The v2 packaging helper now adds package-owned runtime assets. Its `install`
 command requires `--install-dir` for v2 archives and installs the verified pair
 under `<install-dir>/<release-id>/{zpr-demo,simulator}`. This does not upgrade the

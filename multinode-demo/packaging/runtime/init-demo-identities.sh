@@ -57,8 +57,10 @@ check_parents() {
     [ -d "$current" ] && [ ! -L "$current" ] ||
       fail "state ancestors must be existing directories without symlinks"
     read -r owner mode links <<< "$(metadata "$current")"
-    [ "$owner" = 0 ] || [ "$owner" = "$UID_NUMBER" ] ||
-      fail "state ancestors must be owned by root or the invoking user"
+    if [ "$owner" != 0 ] && [ "$owner" != "$UID_NUMBER" ] &&
+      { [ -z "$SUDO_UID_OWNER" ] || [ "$owner" != "$SUDO_UID_OWNER" ]; }; then
+      fail "state ancestors must be owned by root, the invoking user, or the sudo user"
+    fi
     if (( (8#$mode & 0022) != 0 )); then
       (( (8#$mode & 01000) != 0 )) && [ "$owner" = 0 ] ||
         fail "state ancestors must not be writable by other users"
@@ -134,6 +136,12 @@ case "$STATE_DIR" in
 esac
 UID_NUMBER=$(id -u)
 GID_NUMBER=$(id -g)
+SUDO_UID_OWNER=
+if [ "$UID_NUMBER" = 0 ] && [ -n "${SUDO_UID:-}" ]; then
+  [[ "$SUDO_UID" =~ ^(0|[1-9][0-9]*)$ ]] ||
+    fail "SUDO_UID must be a canonical non-negative user ID"
+  SUDO_UID_OWNER=$SUDO_UID
+fi
 check_parents
 
 DIRECTORIES=(include conf bob admin state state/redis logs)
